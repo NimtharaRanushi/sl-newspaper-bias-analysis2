@@ -1,8 +1,8 @@
 """Topic modeling using BERTopic for hierarchical topic discovery."""
 
+import random
 import numpy as np
-from typing import List, Dict, Tuple, Optional
-from tqdm import tqdm
+from typing import List, Dict, Tuple
 
 from bertopic import BERTopic
 from bertopic.representation import KeyBERTInspired
@@ -14,12 +14,6 @@ from sentence_transformers import SentenceTransformer
 from .db import get_db, load_config
 
 
-# Custom stop words for Sri Lankan news corpus
-DOMAIN_STOP_WORDS = {
-    "sri", "lanka", "lankan",
-}
-
-
 class TopicModeler:
     """Discovers topics from article corpus using BERTopic."""
 
@@ -28,38 +22,68 @@ class TopicModeler:
         min_topic_size: int = 10,
         diversity: float = 0.5,
         nr_topics: int = None,
-        embedding_model: str = "all-mpnet-base-v2"
+        embedding_model: str = "all-mpnet-base-v2",
+        stop_words: List[str] = None,
+        random_seed: int = 42,
+        umap_params: Dict = None,
+        hdbscan_params: Dict = None,
+        vectorizer_params: Dict = None
     ):
+        # Set random seeds for reproducibility
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+
         # Load embedding model for word representations
         print(f"Loading embedding model for topic representation...")
         self.embedding_model = SentenceTransformer(embedding_model)
 
+        # UMAP parameters with defaults
+        umap_defaults = {
+            "n_neighbors": 15,
+            "n_components": 5,
+            "min_dist": 0.0,
+            "metric": "cosine",
+            "random_state": random_seed
+        }
+        if umap_params:
+            umap_defaults.update(umap_params)
+
         # UMAP for dimensionality reduction
-        self.umap_model = UMAP(
-            n_neighbors=15,
-            n_components=5,
-            min_dist=0.0,
-            metric='cosine',
-            random_state=42
-        )
+        self.umap_model = UMAP(**umap_defaults)
+
+        # HDBSCAN parameters with defaults
+        hdbscan_defaults = {
+            "min_cluster_size": min_topic_size,
+            "metric": "euclidean",
+            "cluster_selection_method": "eom",
+            "prediction_data": True
+        }
+        if hdbscan_params:
+            hdbscan_defaults.update(hdbscan_params)
 
         # HDBSCAN for clustering
-        self.hdbscan_model = HDBSCAN(
-            min_cluster_size=min_topic_size,
-            metric='euclidean',
-            cluster_selection_method='eom',
-            prediction_data=True
-        )
+        self.hdbscan_model = HDBSCAN(**hdbscan_defaults)
 
         # Vectorizer for topic representation
-        # Combine sklearn's English stop words with custom domain stop words
-        custom_stop_words = list(set(ENGLISH_STOP_WORDS) | DOMAIN_STOP_WORDS)
+        # Use provided stop_words or default to domain stop words
+        if stop_words is None:
+            stop_words = []
 
-        self.vectorizer = CountVectorizer(
-            ngram_range=(1, 3),
-            stop_words=custom_stop_words,
-            min_df=5
-        )
+        custom_stop_words = list(set(ENGLISH_STOP_WORDS) | set(stop_words))
+
+        vectorizer_defaults = {
+            "ngram_range": (1, 3),
+            "stop_words": custom_stop_words,
+            "min_df": 5
+        }
+        if vectorizer_params:
+            # Don't override stop_words from vectorizer_params
+            vectorizer_params_copy = vectorizer_params.copy()
+            if "ngram_range" in vectorizer_params_copy:
+                vectorizer_params_copy["ngram_range"] = tuple(vectorizer_params_copy["ngram_range"])
+            vectorizer_defaults.update(vectorizer_params_copy)
+
+        self.vectorizer = CountVectorizer(**vectorizer_defaults)
 
         # Representation model
         self.representation_model = KeyBERTInspired()
@@ -173,24 +197,33 @@ def label_topics_from_keywords(topic_modeler: TopicModeler) -> List[Dict]:
     return labeled_topics
 
 
-def discover_topics(nr_topics: int = None, save_model: bool = True) -> Dict:
+def discover_topics(
+    result_version_id: str,
+    topic_config: Dict = None,
+    nr_topics: int = None,
+    save_model: bool = True
+) -> Dict:
     """
-    Main function to discover topics from the article corpus.
+    Main function to discover topics from the article corpus for a specific version.
 
     Args:
+        result_version_id: UUID of the result version
+        topic_config: Topic configuration (from version config, or uses defaults from config.yaml)
         nr_topics: Target number of topics (None = auto)
         save_model: Whether to save the trained model
 
     Returns:
         Summary of discovered topics
     """
-    config = load_config()
-    topic_config = config.get("topics", {})
+    # Load default config if not provided
+    if topic_config is None:
+        config = load_config()
+        topic_config = config.get("topics", {})
 
-    # Load articles with embeddings
-    print("Loading articles and embeddings from database...")
+    # Load articles with embeddings for this version
+    print(f"Loading articles and embeddings for version {result_version_id}...")
     with get_db() as db:
-        data = db.get_all_embeddings()
+        data = db.get_all_embeddings(result_version_id=result_version_id)
 
     print(f"Loaded {len(data)} articles with embeddings")
 
@@ -199,11 +232,17 @@ def discover_topics(nr_topics: int = None, save_model: bool = True) -> Dict:
     embeddings = np.array([d['embedding'] for d in data])
     article_ids = [str(d['article_id']) for d in data]
 
-    # Create and fit topic model
+    # Create and fit topic model with custom parameters
     modeler = TopicModeler(
         min_topic_size=topic_config.get("min_topic_size", 10),
         diversity=topic_config.get("diversity", 0.5),
-        nr_topics=nr_topics
+        nr_topics=nr_topics or topic_config.get("nr_topics"),
+        embedding_model=topic_config.get("embedding_model", "all-mpnet-base-v2"),
+        stop_words=topic_config.get("stop_words"),
+        random_seed=topic_config.get("random_seed", 42),
+        umap_params=topic_config.get("umap"),
+        hdbscan_params=topic_config.get("hdbscan"),
+        vectorizer_params=topic_config.get("vectorizer")
     )
 
     topics, probs = modeler.fit(documents, embeddings)
@@ -215,7 +254,7 @@ def discover_topics(nr_topics: int = None, save_model: bool = True) -> Dict:
     print("Saving topics to database...")
     with get_db() as db:
         # Store topics
-        db.store_topics(labeled_topics)
+        db.store_topics(labeled_topics, result_version_id)
 
         # Store article-topic assignments
         assignments = [
@@ -227,11 +266,11 @@ def discover_topics(nr_topics: int = None, save_model: bool = True) -> Dict:
             for i in range(len(article_ids))
             if topics[i] != -1  # Skip outliers for now
         ]
-        db.store_article_topics(assignments)
+        db.store_article_topics(assignments, result_version_id)
 
     # Save model
     if save_model:
-        model_path = "models/bertopic_model"
+        model_path = f"models/bertopic_model_{result_version_id[:8]}"
         import os
         os.makedirs("models", exist_ok=True)
         modeler.save(model_path)
@@ -257,4 +296,5 @@ def discover_topics(nr_topics: int = None, save_model: bool = True) -> Dict:
 
 
 if __name__ == "__main__":
-    discover_topics()
+    print("Please use scripts/02_discover_topics.py instead.")
+    print("Usage: python3 scripts/02_discover_topics.py --version-id <uuid>")

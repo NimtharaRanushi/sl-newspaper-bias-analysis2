@@ -1,9 +1,8 @@
 """Event clustering to group related articles."""
 
+import random
 import numpy as np
-from typing import List, Dict, Tuple
-from datetime import datetime, timedelta
-from collections import defaultdict
+from typing import Dict
 import uuid
 
 from sklearn.metrics.pairwise import cosine_similarity
@@ -13,24 +12,32 @@ from .db import get_db, load_config
 
 
 def cluster_articles(
+    result_version_id: str,
     similarity_threshold: float = 0.8,
     time_window_days: int = 7,
-    min_cluster_size: int = 2
+    min_cluster_size: int = 2,
+    random_seed: int = 42
 ) -> Dict:
     """
-    Cluster articles into events based on embedding similarity.
+    Cluster articles into events based on embedding similarity for a specific version.
 
     Args:
+        result_version_id: UUID of the result version
         similarity_threshold: Minimum cosine similarity to cluster together
         time_window_days: Only cluster articles within this time window
         min_cluster_size: Minimum articles per cluster
+        random_seed: Random seed for reproducibility
 
     Returns:
         Summary of clustering results
     """
-    print("Loading articles with embeddings...")
+    # Set random seeds for reproducibility
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+
+    print(f"Loading articles with embeddings for version {result_version_id}...")
     with get_db() as db:
-        data = db.get_all_embeddings()
+        data = db.get_all_embeddings(result_version_id=result_version_id)
 
     print(f"Loaded {len(data)} articles")
 
@@ -134,7 +141,7 @@ def cluster_articles(
                     {"article_id": aid, "similarity": 1.0}
                     for aid in cluster["article_ids"]
                 ]
-            }])
+            }], result_version_id)
 
     # Summary
     total_clustered = len(clustered)
@@ -188,11 +195,5 @@ def get_cluster_stats() -> Dict:
 
 
 if __name__ == "__main__":
-    config = load_config()
-    cluster_config = config.get("clustering", {})
-
-    cluster_articles(
-        similarity_threshold=cluster_config.get("similarity_threshold", 0.8),
-        time_window_days=cluster_config.get("time_window_days", 7),
-        min_cluster_size=cluster_config.get("min_cluster_size", 2)
-    )
+    print("Please use scripts/03_cluster_events.py instead.")
+    print("Usage: python3 scripts/03_cluster_events.py --version-id <uuid>")

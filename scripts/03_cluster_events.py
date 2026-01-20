@@ -1,40 +1,60 @@
 #!/usr/bin/env python3
-"""Cluster articles into events."""
+"""Cluster articles into events for a specific result version."""
 
 import sys
+import argparse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.clustering import cluster_articles, get_cluster_stats
-from src.db import load_config
+from src.clustering import cluster_articles
+from src.versions import get_version_config, update_pipeline_status
+from src.db import get_db
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Cluster articles into events")
+    parser.add_argument(
+        "--version-id",
+        required=True,
+        help="UUID of the result version"
+    )
+    args = parser.parse_args()
+
+    # Get version configuration
+    version_config = get_version_config(args.version_id)
+    if not version_config:
+        print(f"Error: Version {args.version_id} not found")
+        sys.exit(1)
+
     print("=" * 60)
     print("Event Clustering")
     print("=" * 60)
+    print(f"Version: {args.version_id}")
     print()
 
-    config = load_config()
-    cluster_config = config.get("clustering", {})
+    # Extract clustering configuration
+    cluster_config = version_config.get("clustering", {})
+    random_seed = version_config.get("random_seed", 42)
 
     summary = cluster_articles(
+        result_version_id=args.version_id,
         similarity_threshold=cluster_config.get("similarity_threshold", 0.8),
         time_window_days=cluster_config.get("time_window_days", 7),
-        min_cluster_size=cluster_config.get("min_cluster_size", 2)
+        min_cluster_size=cluster_config.get("min_cluster_size", 2),
+        random_seed=random_seed
     )
 
     print("\n" + "=" * 60)
-    print("Top Event Clusters:")
+    print("Clustering Summary:")
     print("=" * 60)
+    print(f"Total clusters: {summary['total_clusters']}")
+    print(f"Articles clustered: {summary['articles_clustered']}")
+    print(f"Multi-source clusters: {summary['multi_source_clusters']}")
 
-    stats = get_cluster_stats()
-    for cluster in stats["top_clusters"]:
-        print(f"\n{cluster['cluster_name'][:80]}...")
-        print(f"  Articles: {cluster['article_count']}, Sources: {cluster['sources_count']}")
-        if cluster['date_start'] and cluster['date_end']:
-            print(f"  Date range: {cluster['date_start']} to {cluster['date_end']}")
+    # Update pipeline status
+    update_pipeline_status(args.version_id, "clustering", True)
+    print(f"\n✓ Clustering step marked complete for version {args.version_id}")
 
 
 if __name__ == "__main__":

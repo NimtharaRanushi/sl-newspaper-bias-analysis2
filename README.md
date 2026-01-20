@@ -63,7 +63,7 @@ Python 3.11+
 
 ### Setup
 
-1. **Clone the repository**
+1. **Fork and clone the repository**
    ```bash
    git clone https://github.com/YOUR_USERNAME/sl-newspaper-bias-analysis.git
    cd sl-newspaper-bias-analysis
@@ -90,13 +90,13 @@ Python 3.11+
 
 5. **Run the analysis pipeline**
    ```bash
-   # Generate embeddings (takes ~30 min on CPU)
+   # Generate embeddings
    python3 scripts/01_generate_embeddings.py
 
-   # Discover topics (takes ~2-3 min)
+   # Discover topics
    python3 scripts/02_discover_topics.py
 
-   # Cluster events (takes ~10 min)
+   # Cluster events
    python3 scripts/03_cluster_events.py
    ```
 
@@ -126,53 +126,6 @@ sl-newspaper-bias-analysis/
     └── app.py             # Streamlit dashboard
 ```
 
-## Dashboard Preview
-
-The dashboard includes 4 interactive views:
-
-1. **📊 Coverage Tab**: Article volume and timeline by source
-2. **🏷️ Topics Tab**: Top topics and source-topic heatmap
-3. **📰 Events Tab**: Browse event clusters and cross-source coverage
-4. **⚖️ Source Comparison**: Topic focus and selection bias analysis
-
-## Database Schema
-
-### Original Data
-- `news_articles` - Scraped newspaper articles (8,365 articles)
-
-### Analysis Tables
-- `embeddings` - Article embeddings (768-dim vectors)
-- `topics` - Discovered topics (232 topics)
-- `article_analysis` - Article-topic assignments
-- `event_clusters` - Event clusters (1,717 clusters)
-- `article_clusters` - Article-to-cluster mappings
-
-## Research Methodology
-
-Based on: **"The Media Bias Detector: A Framework for Annotating and Analyzing the News at Scale"** (University of Pennsylvania, 2025)
-
-### Adaptations for Sri Lankan Context
-- ✅ Topic hierarchy via data-driven discovery
-- ✅ Event clustering for coverage comparison
-- ✅ Selection bias analysis (topic coverage patterns)
-- ❌ Political lean (Democrat/Republican) - not applicable
-- ⏸️ Framing bias analysis - requires LLM API (future work)
-
-## Future Enhancements
-
-### With LLM API (Claude/OpenAI)
-- **Tone analysis**: Score articles on sentiment scale
-- **Article type classification**: news/opinion/analysis/editorial
-- **Quote extraction**: Extract speaker information
-- **Better topic labels**: LLM-generated descriptive names
-
-### Other Improvements
-- Hierarchical topic relationships
-- Time-series topic trends
-- Quantified selection bias metrics
-- Framing analysis across sources
-- Export functionality
-
 ## Configuration
 
 All configuration is in `config.yaml`:
@@ -193,32 +146,6 @@ clustering:
   time_window_days: 7
 ```
 
-## Performance Notes
-
-- **Embedding generation**: ~30 minutes for 8,365 articles (CPU)
-- **Topic discovery**: ~2-3 minutes
-- **Event clustering**: ~10 minutes
-- **Memory usage**: ~2GB RAM during embedding generation
-
-## Troubleshooting
-
-See [CLAUDE.md](CLAUDE.md) for detailed troubleshooting guides.
-
 ## License
 
 MIT License - see LICENSE file for details
-
-## Attribution
-
-Based on the Media Bias Detector framework from University of Pennsylvania.
-Adapted for Sri Lankan newspaper analysis (2025).
-
-## Documentation
-
-- **README.md** (this file) - Quick start and overview
-- **CLAUDE.md** - Comprehensive documentation and setup guide
-- **schema.sql** - Database schema with comments
-
-## Contact
-
-For questions or issues, please open a GitHub issue or refer to the documentation.
