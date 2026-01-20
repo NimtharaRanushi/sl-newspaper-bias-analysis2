@@ -5,11 +5,20 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import sys
+import json
 from pathlib import Path
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.db import get_db
+from src.versions import (
+    list_versions,
+    get_version,
+    create_version,
+    find_version_by_config,
+    get_default_config
+)
 from bertopic import BERTopic
 
 # Page config
@@ -36,8 +45,8 @@ SOURCE_COLORS = {
 
 
 @st.cache_data(ttl=300)
-def load_overview_stats():
-    """Load overview statistics."""
+def load_overview_stats(version_id=None):
+    """Load overview statistics for a specific version."""
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
@@ -54,17 +63,32 @@ def load_overview_stats():
             """)
             by_source = cur.fetchall()
 
-            # Total topics
-            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.topics WHERE topic_id != -1")
-            total_topics = cur.fetchone()["count"]
+            if version_id:
+                # Total topics for this version
+                cur.execute(
+                    f"SELECT COUNT(*) as count FROM {schema}.topics WHERE topic_id != -1 AND result_version_id = %s",
+                    (version_id,)
+                )
+                total_topics = cur.fetchone()["count"]
 
-            # Total clusters
-            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.event_clusters")
-            total_clusters = cur.fetchone()["count"]
+                # Total clusters for this version
+                cur.execute(
+                    f"SELECT COUNT(*) as count FROM {schema}.event_clusters WHERE result_version_id = %s",
+                    (version_id,)
+                )
+                total_clusters = cur.fetchone()["count"]
 
-            # Multi-source clusters
-            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.event_clusters WHERE sources_count > 1")
-            multi_source = cur.fetchone()["count"]
+                # Multi-source clusters for this version
+                cur.execute(
+                    f"SELECT COUNT(*) as count FROM {schema}.event_clusters WHERE sources_count > 1 AND result_version_id = %s",
+                    (version_id,)
+                )
+                multi_source = cur.fetchone()["count"]
+            else:
+                # Fallback for no version selected
+                total_topics = 0
+                total_clusters = 0
+                multi_source = 0
 
             # Date range
             cur.execute(f"""
@@ -84,41 +108,52 @@ def load_overview_stats():
 
 
 @st.cache_data(ttl=300)
-def load_topics():
-    """Load topic data."""
+def load_topics(version_id=None):
+    """Load topic data for a specific version."""
+    if not version_id:
+        return []
+
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
             cur.execute(f"""
                 SELECT topic_id, name, description, article_count
                 FROM {schema}.topics
-                WHERE topic_id != -1
+                WHERE topic_id != -1 AND result_version_id = %s
                 ORDER BY article_count DESC
-            """)
+            """, (version_id,))
             return cur.fetchall()
 
 
 @st.cache_data(ttl=300)
-def load_topic_by_source():
-    """Load topic distribution by source."""
+def load_topic_by_source(version_id=None):
+    """Load topic distribution by source for a specific version."""
+    if not version_id:
+        return []
+
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
             cur.execute(f"""
                 SELECT t.name as topic, n.source_id, COUNT(*) as count
                 FROM {schema}.article_analysis aa
-                JOIN {schema}.topics t ON aa.primary_topic_id = t.topic_id
+                JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                 JOIN {schema}.news_articles n ON aa.article_id = n.id
                 WHERE t.topic_id != -1
+                  AND aa.result_version_id = %s
+                  AND t.result_version_id = %s
                 GROUP BY t.name, n.source_id
                 ORDER BY count DESC
-            """)
+            """, (version_id, version_id))
             return cur.fetchall()
 
 
 @st.cache_data(ttl=300)
-def load_top_events(limit=20):
-    """Load top event clusters."""
+def load_top_events(version_id=None, limit=20):
+    """Load top event clusters for a specific version."""
+    if not version_id:
+        return []
+
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
@@ -126,14 +161,15 @@ def load_top_events(limit=20):
                 SELECT ec.id, ec.cluster_name, ec.article_count, ec.sources_count,
                        ec.date_start, ec.date_end
                 FROM {schema}.event_clusters ec
+                WHERE ec.result_version_id = %s
                 ORDER BY ec.article_count DESC
                 LIMIT {limit}
-            """)
+            """, (version_id,))
             return cur.fetchall()
 
 
 @st.cache_data(ttl=300)
-def load_event_details(event_id):
+def load_event_details(event_id, version_id=None):
     """Load details for a specific event cluster."""
     with get_db() as db:
         schema = db.config["schema"]
@@ -166,9 +202,17 @@ def load_coverage_timeline():
 
 
 @st.cache_resource
-def load_bertopic_model():
-    """Load the saved BERTopic model."""
-    model_path = Path(__file__).parent.parent / "models" / "bertopic_model"
+def load_bertopic_model(version_id=None):
+    """Load the saved BERTopic model for a specific version."""
+    if not version_id:
+        return None
+
+    # Try version-specific model first
+    model_path = Path(__file__).parent.parent / "models" / f"bertopic_model_{version_id[:8]}"
+    if not model_path.exists():
+        # Fall back to default model
+        model_path = Path(__file__).parent.parent / "models" / "bertopic_model"
+
     if model_path.exists():
         try:
             return BERTopic.load(str(model_path))
@@ -178,12 +222,154 @@ def load_bertopic_model():
     return None
 
 
+def render_version_sidebar():
+    """Render version selection and management in sidebar."""
+    st.sidebar.header("📊 Result Version")
+
+    # Load available versions
+    versions = list_versions()
+
+    if not versions:
+        st.sidebar.warning("No result versions found!")
+        st.sidebar.markdown("Run the pipeline to create a version:")
+        st.sidebar.code("python3 scripts/run_pipeline.py --name baseline")
+        return None
+
+    # Version selector
+    version_options = {
+        f"{v['name']}": v['id']
+        for v in versions
+    }
+
+    selected_name = st.sidebar.selectbox(
+        "Select Version",
+        options=list(version_options.keys()),
+        index=0
+    )
+
+    version_id = version_options[selected_name]
+    version = get_version(version_id)
+
+    # Display version info
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Version Info**")
+    st.sidebar.caption(f"**Name:** {version['name']}")
+    if version['description']:
+        st.sidebar.caption(f"**Description:** {version['description']}")
+    st.sidebar.caption(f"**Created:** {version['created_at'].strftime('%Y-%m-%d %H:%M')}")
+
+    # Pipeline status
+    status = version['pipeline_status']
+    st.sidebar.markdown("**Pipeline Status:**")
+    st.sidebar.caption(f"{'✅' if status.get('embeddings') else '⭕'} Embeddings")
+    st.sidebar.caption(f"{'✅' if status.get('topics') else '⭕'} Topics")
+    st.sidebar.caption(f"{'✅' if status.get('clustering') else '⭕'} Clustering")
+
+    if version['is_complete']:
+        st.sidebar.success("Complete")
+    else:
+        st.sidebar.warning("Incomplete")
+
+    # Configuration preview
+    with st.sidebar.expander("⚙️ Configuration"):
+        config = version['configuration']
+        st.caption(f"**Random Seed:** {config.get('random_seed', 42)}")
+        st.caption(f"**Embedding Model:** {config.get('embeddings', {}).get('model', 'N/A')}")
+        st.caption(f"**Min Topic Size:** {config.get('topics', {}).get('min_topic_size', 'N/A')}")
+        st.caption(f"**Similarity Threshold:** {config.get('clustering', {}).get('similarity_threshold', 'N/A')}")
+
+        if st.button("View Full Config"):
+            st.json(config)
+
+    # Create new version button
+    st.sidebar.markdown("---")
+    if st.sidebar.button("➕ Create New Version"):
+        st.session_state.show_create_version = True
+
+    return version_id
+
+
+def render_create_version_dialog():
+    """Render dialog for creating a new version."""
+    st.header("Create New Result Version")
+
+    with st.form("create_version_form"):
+        name = st.text_input("Version Name", placeholder="e.g., no-location-stopwords")
+        description = st.text_area("Description (optional)", placeholder="What makes this version different?")
+
+        # Configuration editor
+        st.markdown("**Configuration (JSON)**")
+        default_config = get_default_config()
+        config_str = st.text_area(
+            "Edit configuration",
+            value=json.dumps(default_config, indent=2),
+            height=400
+        )
+
+        col1, col2, col3 = st.columns([1, 1, 2])
+
+        with col1:
+            submit = st.form_submit_button("Create Version")
+        with col2:
+            cancel = st.form_submit_button("Cancel")
+
+        if cancel:
+            st.session_state.show_create_version = False
+            st.rerun()
+
+        if submit:
+            if not name:
+                st.error("Version name is required")
+            else:
+                try:
+                    # Parse configuration
+                    config = json.loads(config_str)
+
+                    # Check if config already exists
+                    existing = find_version_by_config(config)
+                    if existing:
+                        st.warning(f"A version with this configuration already exists: **{existing['name']}**")
+                        st.info(f"Version ID: {existing['id']}")
+                    else:
+                        # Create version
+                        version_id = create_version(name, description, config)
+                        st.success(f"✅ Created version: {name}")
+                        st.info(f"Version ID: {version_id}")
+                        st.markdown("**Next step:** Run the pipeline")
+                        st.code(f"python3 scripts/run_pipeline.py --version-id {version_id}")
+
+                        # Hide dialog
+                        st.session_state.show_create_version = False
+
+                except json.JSONDecodeError as e:
+                    st.error(f"Invalid JSON configuration: {e}")
+                except Exception as e:
+                    st.error(f"Error creating version: {e}")
+
+
 def main():
     st.title("🇱🇰 Sri Lanka Media Bias Detector")
     st.markdown("Analyzing coverage patterns across Sri Lankan English newspapers")
 
-    # Load data
-    stats = load_overview_stats()
+    # Initialize session state
+    if 'show_create_version' not in st.session_state:
+        st.session_state.show_create_version = False
+
+    # Render version selector in sidebar
+    version_id = render_version_sidebar()
+
+    # Show create version dialog if requested
+    if st.session_state.get('show_create_version', False):
+        render_create_version_dialog()
+        return
+
+    # Check if version is selected
+    if not version_id:
+        st.info("Please select or create a result version to view dashboard")
+        return
+
+    # Load data for selected version
+    stats = load_overview_stats(version_id)
 
     # Overview metrics
     st.header("Overview")
@@ -224,11 +410,11 @@ def main():
     if st.session_state.active_tab == 0:
         render_coverage_tab(stats)
     elif st.session_state.active_tab == 1:
-        render_topics_tab()
+        render_topics_tab(version_id)
     elif st.session_state.active_tab == 2:
-        render_events_tab()
+        render_events_tab(version_id)
     elif st.session_state.active_tab == 3:
-        render_comparison_tab()
+        render_comparison_tab(version_id)
 
 
 def render_coverage_tab(stats):
@@ -270,11 +456,15 @@ def render_coverage_tab(stats):
         st.plotly_chart(fig, use_container_width=True)
 
 
-def render_topics_tab():
+def render_topics_tab(version_id):
     """Render topics analysis tab."""
     st.subheader("Discovered Topics")
 
-    topics = load_topics()
+    topics = load_topics(version_id)
+    if not topics:
+        st.warning("No topics found for this version. Run topic discovery first.")
+        return
+
     topics_df = pd.DataFrame(topics)
 
     # Top 20 topics bar chart
@@ -293,7 +483,7 @@ def render_topics_tab():
     # Topic by source heatmap
     st.subheader("Topic Coverage by Source")
 
-    topic_source_data = load_topic_by_source()
+    topic_source_data = load_topic_by_source(version_id)
     if topic_source_data:
         ts_df = pd.DataFrame(topic_source_data)
         ts_df['source_name'] = ts_df['source_id'].map(SOURCE_NAMES)
@@ -318,7 +508,7 @@ def render_topics_tab():
     st.divider()
     st.subheader("Topic Model Visualizations")
 
-    topic_model = load_bertopic_model()
+    topic_model = load_bertopic_model(version_id)
     if topic_model:
         viz_option = st.selectbox(
             "Select visualization",
@@ -339,9 +529,9 @@ def render_topics_tab():
 
             elif viz_option == "Topic Bar Charts":
                 st.markdown("**Top words per topic**")
-                # Show top 10 topics
-                top_topics_ids = [t['topic_id'] for t in topics[:10]]
-                fig = topic_model.visualize_barchart(top_n_topics=10, topics=top_topics_ids)
+                # Show top 20 topics
+                top_topics_ids = [t['topic_id'] for t in topics[:20]]
+                fig = topic_model.visualize_barchart(top_n_topics=20, topics=top_topics_ids)
                 st.plotly_chart(fig, use_container_width=True)
 
             elif viz_option == "Topic Similarity Heatmap":
@@ -364,12 +554,16 @@ def render_topics_tab():
         st.info("BERTopic model not found. Run `python3 scripts/02_discover_topics.py` to generate the model.")
 
 
-def render_events_tab():
+def render_events_tab(version_id):
     """Render events analysis tab."""
     st.subheader("Top Event Clusters")
     st.markdown("Events covered by multiple sources - useful for comparing coverage")
 
-    events = load_top_events(30)
+    events = load_top_events(version_id, 30)
+    if not events:
+        st.warning("No event clusters found for this version. Run clustering first.")
+        return
+
     events_df = pd.DataFrame(events)
 
     # Filter to multi-source events
@@ -388,7 +582,7 @@ def render_events_tab():
 
     if selected_event_label:
         event_id = event_options[selected_event_label]
-        articles = load_event_details(event_id)
+        articles = load_event_details(event_id, version_id)
 
         if articles:
             articles_df = pd.DataFrame(articles)
@@ -417,7 +611,7 @@ def render_events_tab():
                 st.dataframe(display_df, use_container_width=True, height=300)
 
 
-def render_comparison_tab():
+def render_comparison_tab(version_id):
     """Render source comparison tab."""
     st.subheader("Source Comparison")
     st.markdown("Compare how different sources cover the same topics and events")
@@ -426,7 +620,7 @@ def render_comparison_tab():
     st.markdown("### Topic Focus by Source")
     st.markdown("What percentage of each source's coverage goes to each topic?")
 
-    topic_source_data = load_topic_by_source()
+    topic_source_data = load_topic_by_source(version_id)
     if topic_source_data:
         ts_df = pd.DataFrame(topic_source_data)
         ts_df['source_name'] = ts_df['source_id'].map(SOURCE_NAMES)
@@ -435,7 +629,7 @@ def render_comparison_tab():
         source_totals = ts_df.groupby('source_name')['count'].sum()
 
         # Get top 10 topics
-        topics = load_topics()
+        topics = load_topics(version_id)
         top_topic_names = [t['name'] for t in topics[:10]]
 
         comparison_data = []
