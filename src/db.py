@@ -5,9 +5,8 @@ import yaml
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Any
 from contextlib import contextmanager
-import numpy as np
 
 
 def load_config() -> dict:
@@ -82,7 +81,7 @@ class Database:
             query += " AND source_id = %s"
             params.append(source_id)
 
-        query += " ORDER BY date_posted"
+        query += " ORDER BY date_posted, id"
 
         if limit:
             query += f" LIMIT {limit} OFFSET {offset}"
@@ -102,62 +101,111 @@ class Database:
             """)
             return cur.fetchone()["count"]
 
-    def get_articles_without_embeddings(self, limit: int = None) -> List[Dict]:
-        """Get articles that don't have embeddings yet."""
-        schema = self.config["schema"]
-        query = f"""
-            SELECT a.id, a.title, a.content, a.date_posted, a.source_id
-            FROM {schema}.news_articles a
-            LEFT JOIN {schema}.embeddings e ON a.id = e.article_id
-            WHERE e.id IS NULL
-              AND a.content IS NOT NULL
-              AND a.content != ''
-            ORDER BY a.date_posted
+    def get_article_by_url(self, url: str) -> Dict:
+        """Fetch article by URL.
+
+        Args:
+            url: The article URL to search for
+
+        Returns:
+            Article dict with id, url, title, content, source_id, date_posted, or None if not found
         """
+        schema = self.config["schema"]
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT id, url, title, content, source_id, date_posted
+                FROM {schema}.news_articles
+                WHERE url = %s
+            """, (url,))
+            return cur.fetchone()
+
+    def get_articles_without_embeddings(self, result_version_id: str = None, limit: int = None) -> List[Dict]:
+        """Get articles that don't have embeddings yet for a specific version."""
+        schema = self.config["schema"]
+
+        if result_version_id:
+            query = f"""
+                SELECT a.id, a.title, a.content, a.date_posted, a.source_id
+                FROM {schema}.news_articles a
+                LEFT JOIN {schema}.embeddings e ON a.id = e.article_id AND e.result_version_id = %s
+                WHERE e.id IS NULL
+                  AND a.content IS NOT NULL
+                  AND a.content != ''
+                ORDER BY a.date_posted, a.id
+            """
+            params = [result_version_id]
+        else:
+            query = f"""
+                SELECT a.id, a.title, a.content, a.date_posted, a.source_id
+                FROM {schema}.news_articles a
+                LEFT JOIN {schema}.embeddings e ON a.id = e.article_id
+                WHERE e.id IS NULL
+                  AND a.content IS NOT NULL
+                  AND a.content != ''
+                ORDER BY a.date_posted, a.id
+            """
+            params = []
+
         if limit:
             query += f" LIMIT {limit}"
 
         with self.cursor() as cur:
-            cur.execute(query)
+            cur.execute(query, params)
             return cur.fetchall()
 
     # Embedding operations
-    def store_embeddings(self, embeddings: List[Dict[str, Any]]):
+    def store_embeddings(self, embeddings: List[Dict[str, Any]], result_version_id: str):
         """Store article embeddings in batch.
 
         Args:
             embeddings: List of dicts with 'article_id' and 'embedding' keys
+            result_version_id: UUID of the result version
         """
         schema = self.config["schema"]
         with self.cursor(dict_cursor=False) as cur:
             execute_values(
                 cur,
                 f"""
-                INSERT INTO {schema}.embeddings (article_id, embedding, embedding_model)
+                INSERT INTO {schema}.embeddings (article_id, result_version_id, embedding, embedding_model)
                 VALUES %s
-                ON CONFLICT (article_id) DO UPDATE SET
+                ON CONFLICT (article_id, result_version_id) DO UPDATE SET
                     embedding = EXCLUDED.embedding,
                     embedding_model = EXCLUDED.embedding_model,
                     created_at = NOW()
                 """,
                 [
-                    (e["article_id"], e["embedding"], e.get("model", "text-embedding-3-large"))
+                    (e["article_id"], result_version_id, e["embedding"], e.get("model", "all-mpnet-base-v2"))
                     for e in embeddings
                 ],
-                template="(%s, %s::vector, %s)"
+                template="(%s, %s, %s::vector, %s)"
             )
 
-    def get_all_embeddings(self) -> List[Dict]:
-        """Get all article embeddings."""
+    def get_all_embeddings(self, result_version_id: str = None) -> List[Dict]:
+        """Get all article embeddings for a specific version."""
         schema = self.config["schema"]
-        with self.cursor() as cur:
-            cur.execute(f"""
+
+        if result_version_id:
+            query = f"""
                 SELECT e.article_id, e.embedding::text, a.title, a.content,
                        a.date_posted, a.source_id
                 FROM {schema}.embeddings e
                 JOIN {schema}.news_articles a ON e.article_id = a.id
-                ORDER BY a.date_posted
-            """)
+                WHERE e.result_version_id = %s
+                ORDER BY a.date_posted, a.id
+            """
+            params = [result_version_id]
+        else:
+            query = f"""
+                SELECT e.article_id, e.embedding::text, a.title, a.content,
+                       a.date_posted, a.source_id
+                FROM {schema}.embeddings e
+                JOIN {schema}.news_articles a ON e.article_id = a.id
+                ORDER BY a.date_posted, a.id
+            """
+            params = []
+
+        with self.cursor() as cur:
+            cur.execute(query, params)
             rows = cur.fetchall()
 
             # Parse embedding strings to float arrays
@@ -180,30 +228,38 @@ class Database:
                 })
             return result
 
-    def get_embedding_count(self) -> int:
-        """Get count of articles with embeddings."""
+    def get_embedding_count(self, result_version_id: str = None) -> int:
+        """Get count of articles with embeddings for a specific version."""
         schema = self.config["schema"]
         with self.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.embeddings")
+            if result_version_id:
+                cur.execute(
+                    f"SELECT COUNT(*) as count FROM {schema}.embeddings WHERE result_version_id = %s",
+                    (result_version_id,)
+                )
+            else:
+                cur.execute(f"SELECT COUNT(*) as count FROM {schema}.embeddings")
             return cur.fetchone()["count"]
 
     # Topic operations
-    def store_topics(self, topics: List[Dict]):
-        """Store discovered topics."""
+    def store_topics(self, topics: List[Dict], result_version_id: str):
+        """Store discovered topics for a specific version."""
         schema = self.config["schema"]
         with self.cursor(dict_cursor=False) as cur:
             for topic in topics:
                 cur.execute(f"""
                     INSERT INTO {schema}.topics
-                    (topic_id, parent_topic_id, name, description, keywords, article_count)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (topic_id) DO UPDATE SET
+                    (topic_id, result_version_id, parent_topic_id, name, description, keywords, article_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (topic_id, result_version_id) DO UPDATE SET
+                        parent_topic_id = EXCLUDED.parent_topic_id,
                         name = EXCLUDED.name,
                         description = EXCLUDED.description,
                         keywords = EXCLUDED.keywords,
                         article_count = EXCLUDED.article_count
                 """, (
                     topic["topic_id"],
+                    result_version_id,
                     topic.get("parent_topic_id"),
                     topic["name"],
                     topic.get("description"),
@@ -211,21 +267,31 @@ class Database:
                     topic.get("article_count", 0)
                 ))
 
-    def store_article_topics(self, assignments: List[Dict]):
-        """Store topic assignments for articles."""
+    def store_article_topics(self, assignments: List[Dict], result_version_id: str):
+        """Store topic assignments for articles for a specific version."""
         schema = self.config["schema"]
         with self.cursor(dict_cursor=False) as cur:
+            # First, build a mapping from BERTopic topic_id to database id
+            cur.execute(
+                f"""
+                SELECT id, topic_id FROM {schema}.topics
+                WHERE result_version_id = %s
+                """,
+                (result_version_id,)
+            )
+            topic_id_to_db_id = {row[1]: row[0] for row in cur.fetchall()}
+
             execute_values(
                 cur,
                 f"""
                 INSERT INTO {schema}.article_analysis
-                (article_id, primary_topic_id, topic_confidence)
+                (article_id, result_version_id, primary_topic_id, topic_confidence)
                 VALUES %s
-                ON CONFLICT (article_id) DO UPDATE SET
+                ON CONFLICT (article_id, result_version_id) DO UPDATE SET
                     primary_topic_id = EXCLUDED.primary_topic_id,
                     topic_confidence = EXCLUDED.topic_confidence
                 """,
-                [(a["article_id"], a["topic_id"], a.get("confidence", 0.0))
+                [(a["article_id"], result_version_id, topic_id_to_db_id.get(a["topic_id"]), a.get("confidence", 0.0))
                  for a in assignments]
             )
 
@@ -271,7 +337,7 @@ class Database:
             WHERE (aa.overall_tone IS NULL OR aa.article_type IS NULL)
               AND a.content IS NOT NULL
               AND a.content != ''
-            ORDER BY a.date_posted
+            ORDER BY a.date_posted, a.id
         """
         if limit:
             query += f" LIMIT {limit}"
@@ -281,17 +347,18 @@ class Database:
             return cur.fetchall()
 
     # Event cluster operations
-    def store_event_clusters(self, clusters: List[Dict]):
-        """Store event clusters."""
+    def store_event_clusters(self, clusters: List[Dict], result_version_id: str):
+        """Store event clusters for a specific version."""
         schema = self.config["schema"]
         with self.cursor(dict_cursor=False) as cur:
             for cluster in clusters:
                 cur.execute(f"""
                     INSERT INTO {schema}.event_clusters
-                    (id, cluster_name, cluster_description, representative_article_id,
+                    (id, result_version_id, cluster_name, cluster_description, representative_article_id,
                      article_count, sources_count, date_start, date_end, centroid_embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
                     ON CONFLICT (id) DO UPDATE SET
+                        result_version_id = EXCLUDED.result_version_id,
                         cluster_name = EXCLUDED.cluster_name,
                         cluster_description = EXCLUDED.cluster_description,
                         representative_article_id = EXCLUDED.representative_article_id,
@@ -302,6 +369,7 @@ class Database:
                         centroid_embedding = EXCLUDED.centroid_embedding
                 """, (
                     cluster["id"],
+                    result_version_id,
                     cluster["name"],
                     cluster.get("description"),
                     cluster["representative_article_id"],
@@ -318,14 +386,231 @@ class Database:
                         cur,
                         f"""
                         INSERT INTO {schema}.article_clusters
-                        (article_id, cluster_id, similarity_score)
+                        (article_id, cluster_id, result_version_id, similarity_score)
                         VALUES %s
-                        ON CONFLICT (article_id, cluster_id) DO UPDATE SET
+                        ON CONFLICT (article_id, cluster_id, result_version_id) DO UPDATE SET
                             similarity_score = EXCLUDED.similarity_score
                         """,
-                        [(a["article_id"], cluster["id"], a.get("similarity", 0.0))
+                        [(a["article_id"], cluster["id"], result_version_id, a.get("similarity", 0.0))
                          for a in cluster["articles"]]
                     )
+    # Word frequency operations
+    def store_word_frequencies(self, frequencies: List[Dict], result_version_id: str):
+        """Store word frequency results for a specific version.
+
+        Args:
+            frequencies: List of dicts with 'source_id', 'word', 'frequency', 'tfidf_score', 'rank'
+            result_version_id: UUID of the result version
+        """
+        schema = self.config["schema"]
+        with self.cursor(dict_cursor=False) as cur:
+            execute_values(
+                cur,
+                f"""
+                INSERT INTO {schema}.word_frequencies
+                (result_version_id, source_id, word, frequency, tfidf_score, rank)
+                VALUES %s
+                ON CONFLICT (result_version_id, source_id, word) DO UPDATE SET
+                    frequency = EXCLUDED.frequency,
+                    tfidf_score = EXCLUDED.tfidf_score,
+                    rank = EXCLUDED.rank,
+                    created_at = NOW()
+                """,
+                [
+                    (
+                        result_version_id,
+                        f["source_id"],
+                        f["word"],
+                        f["frequency"],
+                        f.get("tfidf_score"),
+                        f["rank"]
+                    )
+                    for f in frequencies
+                ]
+            )
+
+    def get_word_frequencies(
+        self,
+        result_version_id: str,
+        source_id: str = None,
+        limit: int = 50
+    ) -> List[Dict]:
+        """Get word frequencies for a specific version and optional source.
+
+        Args:
+            result_version_id: UUID of the result version
+            source_id: Optional source filter
+            limit: Maximum number of words to return per source
+
+        Returns:
+            List of dicts with word frequency data
+        """
+        schema = self.config["schema"]
+        params = [result_version_id]
+
+        query = f"""
+            SELECT source_id, word, frequency, tfidf_score, rank
+            FROM {schema}.word_frequencies
+            WHERE result_version_id = %s
+        """
+
+        if source_id:
+            query += " AND source_id = %s"
+            params.append(source_id)
+
+        query += " AND rank <= %s ORDER BY source_id, rank"
+        params.append(limit)
+
+        with self.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchall()
+
+    # Named entity operations
+    def store_named_entities(
+        self,
+        entities: List[Dict[str, Any]],
+        result_version_id: str
+    ) -> None:
+        """
+        Store named entities in the database.
+
+        Args:
+            entities: List of entity dictionaries
+            result_version_id: UUID of the result version
+        """
+        schema = self.config["schema"]
+
+        with self.cursor() as cur:
+            for entity in entities:
+                cur.execute(
+                    f"""
+                    INSERT INTO {schema}.named_entities
+                    (result_version_id, article_id, entity_text, entity_type,
+                     start_char, end_char, confidence, context)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (article_id, result_version_id, entity_text, entity_type, start_char)
+                    DO NOTHING
+                    """,
+                    (
+                        result_version_id,
+                        entity["article_id"],
+                        entity["entity_text"],
+                        entity["entity_type"],
+                        entity["start_char"],
+                        entity["end_char"],
+                        entity["confidence"],
+                        entity.get("context", "")
+                    )
+                )
+
+    def compute_entity_statistics(self, result_version_id: str) -> None:
+        """
+        Compute aggregated entity statistics per source.
+
+        Args:
+            result_version_id: UUID of the result version
+        """
+        schema = self.config["schema"]
+
+        with self.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {schema}.entity_statistics
+                (result_version_id, entity_text, entity_type, source_id,
+                 mention_count, article_count, avg_confidence)
+                SELECT
+                    ne.result_version_id,
+                    ne.entity_text,
+                    ne.entity_type,
+                    na.source_id,
+                    COUNT(*) as mention_count,
+                    COUNT(DISTINCT ne.article_id) as article_count,
+                    AVG(ne.confidence) as avg_confidence
+                FROM {schema}.named_entities ne
+                JOIN {schema}.news_articles na ON ne.article_id = na.id
+                WHERE ne.result_version_id = %s
+                GROUP BY ne.result_version_id, ne.entity_text, ne.entity_type, na.source_id
+                ON CONFLICT (result_version_id, entity_text, entity_type, source_id)
+                DO UPDATE SET
+                    mention_count = EXCLUDED.mention_count,
+                    article_count = EXCLUDED.article_count,
+                    avg_confidence = EXCLUDED.avg_confidence
+                """,
+                (result_version_id,)
+            )
+
+    def get_entity_statistics(
+        self,
+        result_version_id: str,
+        entity_type: str = None,
+        source_id: str = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get entity statistics for a version.
+
+        Args:
+            result_version_id: UUID of the result version
+            entity_type: Optional filter by entity type
+            source_id: Optional filter by source
+            limit: Maximum number of results
+
+        Returns:
+            List of entity statistics
+        """
+        schema = self.config["schema"]
+
+        query = f"""
+            SELECT entity_text, entity_type, source_id,
+                   mention_count, article_count, avg_confidence
+            FROM {schema}.entity_statistics
+            WHERE result_version_id = %s
+        """
+        params = [result_version_id]
+
+        if entity_type:
+            query += " AND entity_type = %s"
+            params.append(entity_type)
+
+        if source_id:
+            query += " AND source_id = %s"
+            params.append(source_id)
+
+        query += " ORDER BY mention_count DESC LIMIT %s"
+        params.append(limit)
+
+        with self.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchall()
+
+    def get_entities_for_article(
+        self,
+        article_id: str,
+        result_version_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all named entities for a specific article.
+
+        Args:
+            article_id: The article ID
+            result_version_id: UUID of the result version
+
+        Returns:
+            List of entity dicts with entity_text, entity_type, start_char, end_char, confidence
+            Ordered by start_char for sequential processing
+        """
+        schema = self.config["schema"]
+
+        query = f"""
+            SELECT entity_text, entity_type, start_char, end_char, confidence
+            FROM {schema}.named_entities
+            WHERE article_id = %s AND result_version_id = %s
+            ORDER BY start_char
+        """
+
+        with self.cursor() as cur:
+            cur.execute(query, (article_id, result_version_id))
+            return cur.fetchall()
 
     # Sentiment analysis operations
     def store_sentiment_analyses(self, analyses: List[Dict]):

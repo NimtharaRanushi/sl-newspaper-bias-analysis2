@@ -5,32 +5,57 @@
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- Result versions for configuration-based analysis
+CREATE TABLE IF NOT EXISTS media_bias.result_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    configuration JSONB NOT NULL,
+    analysis_type VARCHAR(50) NOT NULL DEFAULT 'combined',
+    is_complete BOOLEAN DEFAULT false,
+    pipeline_status JSONB DEFAULT '{"embeddings": false, "topics": false, "clustering": false, "word_frequency": false, "ner": false}'::jsonb,
+    model_data BYTEA,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    CONSTRAINT result_versions_name_analysis_type_key UNIQUE (name, analysis_type)
+);
+
+COMMENT ON COLUMN media_bias.result_versions.analysis_type IS
+  'Type of analysis: ''topics'' for topic discovery, ''clustering'' for event clustering, ''combined'' for legacy versions';
+
+COMMENT ON COLUMN media_bias.result_versions.model_data IS
+  'Compressed tar.gz archive of BERTopic model directory (for visualizations). NULL if model not stored in database.';
+
 -- Topics discovered via BERTopic
 CREATE TABLE IF NOT EXISTS media_bias.topics (
     id SERIAL PRIMARY KEY,
-    topic_id INTEGER UNIQUE NOT NULL,
+    topic_id INTEGER NOT NULL,
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
     parent_topic_id INTEGER REFERENCES media_bias.topics(id),
     name VARCHAR(255) NOT NULL,
     description TEXT,
     keywords TEXT[],
     article_count INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(topic_id, result_version_id)
 );
 
 -- Article embeddings
 CREATE TABLE IF NOT EXISTS media_bias.embeddings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
-    embedding VECTOR(3072),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    embedding VECTOR,
     embedding_model VARCHAR(100),
     created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(article_id)
+    UNIQUE(article_id, result_version_id)
 );
 
 -- Article-level analysis results
 CREATE TABLE IF NOT EXISTS media_bias.article_analysis (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
     primary_topic_id INTEGER REFERENCES media_bias.topics(id),
     topic_confidence FLOAT,
     article_type VARCHAR(50),
@@ -41,12 +66,13 @@ CREATE TABLE IF NOT EXISTS media_bias.article_analysis (
     llm_provider VARCHAR(50),
     llm_model VARCHAR(100),
     processed_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(article_id)
+    UNIQUE(article_id, result_version_id)
 );
 
 -- Event clusters
 CREATE TABLE IF NOT EXISTS media_bias.event_clusters (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
     cluster_name VARCHAR(255),
     cluster_description TEXT,
     representative_article_id UUID REFERENCES media_bias.news_articles(id),
@@ -55,7 +81,7 @@ CREATE TABLE IF NOT EXISTS media_bias.event_clusters (
     date_start DATE,
     date_end DATE,
     primary_topic_id INTEGER REFERENCES media_bias.topics(id),
-    centroid_embedding VECTOR(3072),
+    centroid_embedding VECTOR,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -64,16 +90,74 @@ CREATE TABLE IF NOT EXISTS media_bias.article_clusters (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
     cluster_id UUID NOT NULL REFERENCES media_bias.event_clusters(id),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
     similarity_score FLOAT,
-    UNIQUE(article_id, cluster_id)
+    UNIQUE(article_id, cluster_id, result_version_id)
+);
+
+-- Word frequency analysis results
+CREATE TABLE IF NOT EXISTS media_bias.word_frequencies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    source_id VARCHAR(50) NOT NULL,
+    word VARCHAR(255) NOT NULL,
+    frequency INTEGER NOT NULL,
+    tfidf_score FLOAT,
+    rank INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(result_version_id, source_id, word)
+);
+
+-- Named entities discovered in articles
+CREATE TABLE IF NOT EXISTS media_bias.named_entities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
+    entity_text VARCHAR(500) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    confidence FLOAT,
+    context TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(article_id, result_version_id, entity_text, entity_type, start_char)
+);
+
+-- Entity statistics per source (aggregated view)
+CREATE TABLE IF NOT EXISTS media_bias.entity_statistics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    entity_text VARCHAR(500) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    source_id VARCHAR(50) NOT NULL,
+    mention_count INTEGER DEFAULT 0,
+    article_count INTEGER DEFAULT 0,
+    avg_confidence FLOAT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(result_version_id, entity_text, entity_type, source_id)
 );
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_embeddings_article ON media_bias.embeddings(article_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_version ON media_bias.embeddings(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_topics_version ON media_bias.topics(result_version_id);
 CREATE INDEX IF NOT EXISTS idx_article_analysis_article ON media_bias.article_analysis(article_id);
+CREATE INDEX IF NOT EXISTS idx_article_analysis_version ON media_bias.article_analysis(result_version_id);
 CREATE INDEX IF NOT EXISTS idx_article_analysis_topic ON media_bias.article_analysis(primary_topic_id);
 CREATE INDEX IF NOT EXISTS idx_article_clusters_article ON media_bias.article_clusters(article_id);
 CREATE INDEX IF NOT EXISTS idx_article_clusters_cluster ON media_bias.article_clusters(cluster_id);
+CREATE INDEX IF NOT EXISTS idx_article_clusters_version ON media_bias.article_clusters(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_event_clusters_version ON media_bias.event_clusters(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_word_frequencies_version ON media_bias.word_frequencies(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_word_frequencies_source ON media_bias.word_frequencies(result_version_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_word_frequencies_rank ON media_bias.word_frequencies(result_version_id, source_id, rank);
+CREATE INDEX IF NOT EXISTS idx_named_entities_version ON media_bias.named_entities(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_named_entities_article ON media_bias.named_entities(article_id);
+CREATE INDEX IF NOT EXISTS idx_named_entities_type ON media_bias.named_entities(result_version_id, entity_type);
+CREATE INDEX IF NOT EXISTS idx_named_entities_text ON media_bias.named_entities(result_version_id, entity_text);
+CREATE INDEX IF NOT EXISTS idx_entity_stats_version ON media_bias.entity_statistics(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_entity_stats_source ON media_bias.entity_statistics(result_version_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_entity_stats_type ON media_bias.entity_statistics(result_version_id, entity_type);
 
 -- HNSW index for similarity search (if pgvector supports it)
 -- CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw ON media_bias.embeddings

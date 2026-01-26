@@ -72,7 +72,7 @@ Python 3.11+
 
 ### Setup
 
-1. **Clone the repository**
+1. **Fork and clone the repository**
    ```bash
    git clone https://github.com/YOUR_USERNAME/sl-newspaper-bias-analysis.git
    cd sl-newspaper-bias-analysis
@@ -99,13 +99,13 @@ Python 3.11+
 
 5. **Run the analysis pipeline**
    ```bash
-   # Generate embeddings (takes ~30 min on CPU)
+   # Generate embeddings
    python3 scripts/01_generate_embeddings.py
 
-   # Discover topics (takes ~2-3 min)
+   # Discover topics
    python3 scripts/02_discover_topics.py
 
-   # Cluster events (takes ~10 min)
+   # Cluster events
    python3 scripts/03_cluster_events.py
 
    # Analyze sentiment (optional, choose model)
@@ -133,11 +133,22 @@ sl-newspaper-bias-analysis/
 │   ├── embeddings.py      # Embedding generation
 │   ├── topics.py          # Topic modeling
 │   ├── sentiment.py       # Sentiment analysis (3 models)
-│   └── clustering.py      # Event clustering
+│   ├── clustering.py      # Event clustering
+│   ├── word_frequency.py  # Word frequency analysis
+│   ├── ner.py             # Named entity recognition
+│   └── versions.py        # Result version management
 ├── scripts/
-│   ├── 01_generate_embeddings.py
-│   ├── 02_discover_topics.py
-│   ├── 03_cluster_events.py
+│   ├── topics/
+│   │   ├── 01_generate_embeddings.py
+│   │   └── 02_discover_topics.py
+│   ├── clustering/
+│   │   ├── 01_generate_embeddings.py
+│   │   └── 02_cluster_events.py
+│   ├── word_frequency/
+│   │   └── 01_compute_word_frequency.py
+│   ├── ner/
+│   │   └── 01_extract_entities.py
+│   ├── manage_versions.py
 │   └── 04_analyze_sentiment.py
 └── dashboard/
     └── app.py             # Streamlit dashboard
@@ -145,18 +156,23 @@ sl-newspaper-bias-analysis/
 
 ## Dashboard Preview
 
-The dashboard includes 5 interactive views:
+The dashboard includes 7 interactive views:
 
 1. **📊 Coverage Tab**: Article volume and timeline by source
 2. **🏷️ Topics Tab**: Top topics and source-topic heatmap
 3. **📰 Events Tab**: Browse event clusters and cross-source coverage
-4. **⚖️ Source Comparison**: Topic focus and selection bias analysis
-5. **😊 Sentiment Tab**: Sentiment analysis with multiple models and visualizations
+4. **📝 Word Frequency Tab**: Most distinctive words per source
+5. **👤 Named Entities Tab**: People, organizations, locations mentioned
+6. **⚖️ Source Comparison**: Topic focus and selection bias analysis
+7. **😊 Sentiment Tab**: Sentiment analysis with multiple models and visualizations
 
 ## Database Schema
 
 ### Original Data
 - `news_articles` - Scraped newspaper articles (8,365 articles)
+
+### Result Versioning
+- `result_versions` - Configuration-based version tracking for reproducible analysis
 
 ### Analysis Tables
 - `embeddings` - Article embeddings (768-dim vectors)
@@ -164,6 +180,8 @@ The dashboard includes 5 interactive views:
 - `article_analysis` - Article-topic assignments
 - `event_clusters` - Event clusters (1,717 clusters)
 - `article_clusters` - Article-to-cluster mappings
+- `word_frequencies` - Word frequency rankings per source
+- `named_entities` - Extracted entities with positions and confidence
 - `sentiment_analyses` - Sentiment scores for each model (local/llm/hybrid)
 - `sentiment_summary` - Materialized view for performance
 
@@ -252,6 +270,8 @@ Based on: **"The Media Bias Detector: A Framework for Annotating and Analyzing t
 - ✅ Event clustering for coverage comparison
 - ✅ Selection bias analysis (topic coverage patterns)
 - ✅ Sentiment analysis with multiple models
+- ✅ Word frequency analysis for distinctive vocabulary
+- ✅ Named entity recognition for key people and organizations
 - ❌ Political lean (Democrat/Republican) - not applicable
 - ⏸️ Framing bias analysis - future work
 
@@ -273,7 +293,6 @@ Based on: **"The Media Bias Detector: A Framework for Annotating and Analyzing t
 - Quantified selection bias metrics
 - Framing comparison across sources
 - Sentiment alerts for unusual patterns
-
 ## Configuration
 
 All configuration is in `config.yaml`:
@@ -313,11 +332,13 @@ sentiment:
     local_threshold: 0.7  # Use LLM if confidence < 0.7
 ```
 
-## Performance Notes
+## Performance
 
 - **Embedding generation**: ~30 minutes for 8,365 articles (CPU)
 - **Topic discovery**: ~2-3 minutes
 - **Event clustering**: ~10 minutes
+- **Word frequency**: ~5 minutes
+- **Named entity recognition**: ~20 minutes
 - **Sentiment analysis**:
   - Local model: ~15 minutes (CPU)
   - LLM model: ~4-6 hours ($31)
@@ -325,25 +346,76 @@ sentiment:
 - **Memory usage**: ~2GB RAM during embedding generation
 - **Dashboard**: All queries cached, <3 second load times
 
-## Troubleshooting
+## Managing Result Versions
 
-See [CLAUDE.md](CLAUDE.md) for detailed troubleshooting guides.
+The project uses a version management system to track different analysis configurations. This allows you to experiment with different parameters and compare results.
+
+### List Versions
+
+```bash
+# List all versions
+python3 scripts/manage_versions.py list
+
+# Filter by analysis type
+python3 scripts/manage_versions.py list --type topics
+python3 scripts/manage_versions.py list --type clustering
+python3 scripts/manage_versions.py list --type word_frequency
+```
+
+### View Version Statistics
+
+Before deleting, check what data a version contains:
+
+```bash
+python3 scripts/manage_versions.py stats <version-id>
+```
+
+This shows:
+- Version metadata (name, type, description, dates)
+- Data counts (embeddings, topics, clusters, etc.)
+- Total records that would be affected
+
+### Delete a Version
+
+**Interactive deletion with safety prompts:**
+
+```bash
+python3 scripts/manage_versions.py delete <version-id>
+```
+
+This command:
+- ✅ Shows version details and statistics
+- ✅ Displays all data that will be deleted
+- ✅ Requires you to type the version name to confirm
+- ✅ Requires you to type 'DELETE' for final confirmation
+- ✅ Cascade deletes all related records automatically
+- ✅ **Never deletes** original articles in `news_articles` table
+
+**What gets deleted:**
+- Embeddings (embedding vectors)
+- Topics (discovered topics)
+- Article analyses (article-topic assignments)
+- Event clusters (grouped events)
+- Article-cluster mappings
+- Word frequencies (if applicable)
+
+**Programmatic deletion (Python):**
+
+```python
+# Safe interactive deletion
+from src.versions import delete_version_interactive
+delete_version_interactive("version-id-here")
+
+# Direct deletion (no confirmation - use with caution!)
+from src.versions import delete_version
+success = delete_version("version-id-here")
+
+# Preview what will be deleted
+from src.versions import get_version_statistics
+stats = get_version_statistics("version-id-here")
+print(f"Will delete {sum(stats.values())} records")
+```
 
 ## License
 
 MIT License - see LICENSE file for details
-
-## Attribution
-
-Based on the Media Bias Detector framework from University of Pennsylvania.
-Adapted for Sri Lankan newspaper analysis (2025).
-
-## Documentation
-
-- **README.md** (this file) - Quick start and overview
-- **CLAUDE.md** - Comprehensive documentation and setup guide
-- **schema.sql** - Database schema with comments
-
-## Contact
-
-For questions or issues, please open a GitHub issue or refer to the documentation.
