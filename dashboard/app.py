@@ -1618,20 +1618,19 @@ def render_sentiment_tab():
         st.warning("No sentiment analysis data found. Run `python scripts/04_analyze_sentiment.py` first.")
         return
 
-    # Sidebar: Global topic selector
-    st.sidebar.markdown("### Filters")
+    # Topic selector in main area (consistent with other tabs)
     topic_options = ["All Topics"] + [t['name'] for t in topics]
-    selected_topic = st.sidebar.selectbox(
-        "Select Topic",
+    selected_topic = st.selectbox(
+        "Filter by Topic",
         options=topic_options,
         help="Filter all visualizations by topic"
     )
 
-    # Show available models
+    # Show available models in an expander (like version details in other tabs)
     model_list = [m['model_type'] for m in available_models]
-    st.sidebar.markdown("### Available Models")
-    for m in available_models:
-        st.sidebar.text(f"✓ {m['model_type']}: {m['article_count']:,} articles")
+    with st.expander("ℹ️ Available Models"):
+        for m in available_models:
+            st.caption(f"✓ {m['model_type']}: {m['article_count']:,} articles")
 
     # View mode selector
     view_mode = st.radio(
