@@ -768,12 +768,12 @@ def main():
     st.divider()
 
     # Tabs for different views
-    tab_names = ["📊 Coverage", "🏷️ Topics", "📰 Events", "📝 Word Frequency", "👤 Named Entities", "⚖️ Source Comparison", "😊 Sentiment"]
+    tab_names = ["📊 Coverage", "🏷️ Topics", "📰 Events", "📝 Word Frequency", "👤 Named Entities", "😊 Sentiment"]
 
-    # Create buttons to switch tabs (2 rows for 7 tabs)
-    # First row: 4 tabs
-    cols_row1 = st.columns(4)
-    for idx in range(4):
+    # Create buttons to switch tabs (6 tabs in 2 rows)
+    # First row: 3 tabs
+    cols_row1 = st.columns(3)
+    for idx in range(3):
         with cols_row1[idx]:
             if st.button(tab_names[idx], key=f"tab_{idx}",
                         type="primary" if st.session_state.active_tab == idx else "secondary"):
@@ -781,8 +781,8 @@ def main():
 
     # Second row: 3 tabs
     cols_row2 = st.columns(3)
-    for idx in range(4, 7):
-        with cols_row2[idx - 4]:
+    for idx in range(3, 6):
+        with cols_row2[idx - 3]:
             if st.button(tab_names[idx], key=f"tab_{idx}",
                         type="primary" if st.session_state.active_tab == idx else "secondary"):
                 st.session_state.active_tab = idx
@@ -801,8 +801,6 @@ def main():
     elif st.session_state.active_tab == 4:
         render_ner_tab()
     elif st.session_state.active_tab == 5:
-        render_comparison_tab()
-    elif st.session_state.active_tab == 6:
         render_sentiment_tab()
 
 
@@ -1401,18 +1399,6 @@ def render_article_with_entities(content: str, entities: list) -> str:
 
     html_content = ''.join(html_parts)
     return f'<div style="line-height: 1.8; font-size: 16px; white-space: pre-wrap;">{html_content}</div>'
-
-
-def render_comparison_tab():
-    """Render source comparison tab."""
-    st.subheader("⚖️ Source Comparison")
-    st.info("Source comparison features are integrated into other tabs:")
-    st.markdown("""
-    - **Topics Tab**: View topic coverage distribution and selection bias across sources
-    - **Events Tab**: Compare multi-source coverage of the same events
-    - **Word Frequency Tab**: Compare distinctive vocabulary across sources
-    - **Sentiment Tab**: Compare sentiment patterns across sources
-    """)
 
 
 def render_ner_tab():
