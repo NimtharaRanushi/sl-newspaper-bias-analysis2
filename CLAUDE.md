@@ -489,10 +489,17 @@ The project supports multiple summarization methods to generate concise summarie
 - **TextRank**: Graph-based ranking algorithm that selects important sentences
 - **LexRank**: Similar to TextRank, using sentence similarity for ranking
 
-**Abstractive Methods (Local Models):**
+**Abstractive Methods (Local Models - Standard Length):**
 - **BART** (`facebook/bart-large-cnn`): 1.6GB, excellent quality, handles articles up to ~750 words
 - **T5** (`t5-base`): 890MB, good quality, handles articles up to ~380 words
 - **Pegasus** (`google/pegasus-xsum`): 2.2GB, best quality, handles articles up to ~750 words
+
+**Abstractive Methods (Local Models - Long Context):**
+- **LED** (`allenai/led-base-16384`): 200MB, handles articles up to ~12,000 words, uses efficient long-range attention
+- **LongT5** (`google/long-t5-tglobal-base`): 250MB, handles articles up to ~3,000 words, good for long documents
+- **BigBird-Pegasus** (`google/bigbird-pegasus-large-arxiv`): 2.8GB, handles articles up to ~3,000 words
+  - **Note**: This is the "large" model (no base variant exists) and will be slow on CPU (10-20s per article)
+  - Trained on academic papers, may need fine-tuning for news articles
 
 **LLM-Based Methods (API):**
 - **Claude Sonnet 4**: Highest quality, handles all article lengths, ~$5-10 for 8,478 articles
@@ -581,11 +588,11 @@ streamlit run dashboard/Home.py
 **Method-Specific Settings:**
 ```yaml
 summarization:
-  method: textrank  # textrank | lexrank | bart | t5 | pegasus | claude | gpt
+  method: textrank  # textrank | lexrank | bart | t5 | pegasus | led | longt5 | bigbird-pegasus | claude | gpt
   summary_length: medium  # short | medium | long
 
   # Transformer model settings
-  max_input_length: 1024  # Max tokens for BART/T5/Pegasus
+  max_input_length: 1024  # Max tokens for standard models (BART/T5/Pegasus)
   chunk_long_articles: true  # Split articles longer than max_input_length
 
   # LLM settings
@@ -595,21 +602,31 @@ summarization:
 
 ### Performance Comparison
 
-Based on ~500 word articles:
+Based on ~500 word articles (CPU performance):
 
-| Method | Speed | Quality | Cost | Model Size |
-|--------|-------|---------|------|------------|
-| TextRank | 10-50ms | Good | Free | None |
-| LexRank | 10-50ms | Good | Free | None |
-| BART | 500ms-2s (GPU)<br>5-10s (CPU) | High | Free | 1.6GB |
-| T5 | 300ms-1s (GPU)<br>3-8s (CPU) | Good | Free | 890MB |
-| Pegasus | 600ms-2s (GPU)<br>5-12s (CPU) | Excellent | Free | 2.2GB |
-| Claude | 1-3s | Excellent | ~$0.001/article | API |
-| GPT-4 | 1-3s | Excellent | ~$0.001/article | API |
+| Method | Speed (CPU) | Quality | Cost | Model Size | Max Length |
+|--------|-------------|---------|------|------------|------------|
+| TextRank | 10-50ms | Good | Free | None | Unlimited |
+| LexRank | 10-50ms | Good | Free | None | Unlimited |
+| BART | 5-10s | High | Free | 1.6GB | ~750 words |
+| T5 | 3-8s | Good | Free | 890MB | ~380 words |
+| Pegasus | 5-12s | Excellent | Free | 2.2GB | ~750 words |
+| LED | 8-15s | Good | Free | 200MB | ~12,000 words |
+| LongT5 | 6-12s | Good | Free | 250MB | ~3,000 words |
+| BigBird-Pegasus | 10-20s | High | Free | 2.8GB | ~3,000 words |
+| Claude | 1-3s | Excellent | ~$0.001/article | API | Unlimited |
+| GPT-4 | 1-3s | Excellent | ~$0.001/article | API | Unlimited |
+
+**Notes:**
+- GPU speeds are typically 5-10x faster than CPU
+- Long-context models (LED, LongT5, BigBird-Pegasus) excel at articles >1000 words
+- BigBird-Pegasus is slower due to "large" model size (no base variant available)
+- All transformer models run on CPU by default to avoid CUDA tokenization issues
 
 **Recommendations:**
 - **Quick experimentation**: Start with TextRank (fastest, no setup)
-- **Best free quality**: Pegasus (requires GPU for reasonable speed)
+- **Best free quality (short articles)**: Pegasus (up to ~750 words)
+- **Best free quality (long articles)**: LED or LongT5 (handles multi-page documents)
 - **Production**: Claude Sonnet 4 (best quality/cost ratio, handles all lengths)
 - **Comparison**: Run all methods on a sample to evaluate for your use case
 
@@ -643,7 +660,7 @@ Based on ~500 word articles:
 - View article summaries with original text comparison
 - Statistics: compression ratio, word count, processing time
 - Filter by source and search by title
-- Compare summarization methods (TextRank, LexRank, BART, T5, Pegasus, Claude, GPT)
+- Compare summarization methods (TextRank, LexRank, BART, T5, Pegasus, LED, LongT5, BigBird-Pegasus, Claude, GPT)
 - Source-level compression and performance metrics
 
 ## Configuration
@@ -675,7 +692,7 @@ clustering:
 
 # Summarization
 summarization:
-  method: textrank             # textrank | lexrank | bart | t5 | pegasus | claude | gpt
+  method: textrank             # textrank | lexrank | bart | t5 | pegasus | led | longt5 | bigbird-pegasus | claude | gpt
   summary_length: medium       # short | medium | long
   short_sentences: 3
   short_words: 50
@@ -683,7 +700,7 @@ summarization:
   medium_words: 100
   long_sentences: 8
   long_words: 150
-  max_input_length: 1024       # Max tokens for transformer models
+  max_input_length: 1024       # Max tokens for standard models (ignored for long-context models)
   chunk_long_articles: true    # Split articles longer than max_input_length
   llm_model: claude-sonnet-4-20250514
   llm_temperature: 0.0
