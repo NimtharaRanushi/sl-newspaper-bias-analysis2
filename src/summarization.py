@@ -4,7 +4,7 @@ import os
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 from tqdm import tqdm
 
 # Resolve the project root (parent of src/)
@@ -67,7 +67,6 @@ class BaseSummarizer(ABC):
 
     def count_sentences(self, text: str) -> int:
         """Count sentences in text."""
-        # Simple sentence splitting
         sentences = re.split(r'[.!?]+', text)
         return len([s for s in sentences if s.strip()])
 
@@ -101,14 +100,11 @@ class TextRankSummarizer(BaseSummarizer):
         target_sentences, _ = self.get_target_length()
 
         try:
-            # Parse the text
             from io import StringIO
             parser = self.parser_class.from_string(text, self.tokenizer)
 
-            # Generate summary
             summary_sentences = self.summarizer(parser.document, target_sentences)
 
-            # Combine sentences
             summary = " ".join(str(sentence) for sentence in summary_sentences)
             return summary.strip()
 
@@ -165,15 +161,27 @@ class TransformerSummarizer(BaseSummarizer):
         super().__init__(config)
         from transformers import pipeline
 
-        # Model mapping
         model_map = {
             "bart": "facebook/bart-large-cnn",
             "t5": "t5-base",
-            "pegasus": "google/pegasus-xsum"
+            "pegasus": "google/pegasus-xsum",
+            "led": "allenai/led-base-16384",
+            "bigbird-pegasus": "google/bigbird-pegasus-large-arxiv",
+            "longt5": "google/long-t5-tglobal-base",
+        }
+
+        model_max_tokens_map = {
+            "bart": 1024,
+            "t5": 512,
+            "pegasus": 512,
+            "led": 16384,
+            "bigbird-pegasus": 4096,
+            "longt5": 4096,
         }
 
         model_name = model_map.get(self.method, "facebook/bart-large-cnn")
-        self.max_input_length = config.get("max_input_length", 1024)
+        model_key = self.method if self.method in model_map else "bart"
+        self.model_key = model_key
         self.chunk_long_articles = config.get("chunk_long_articles", True)
 
         try:
@@ -184,9 +192,12 @@ class TransformerSummarizer(BaseSummarizer):
             # T5 models use relative position encodings and don't have max_position_embeddings
             self.model_max_tokens = getattr(
                 self.summarizer.model.config, 'max_position_embeddings',
-                getattr(self.summarizer.model.config, 'n_positions', 512)
+                getattr(self.summarizer.model.config, 'n_positions', model_max_tokens_map[model_key])
             )
             self.tokenizer = self.summarizer.tokenizer
+            # Keep tokenizer length aligned with our internal truncation
+            if hasattr(self.tokenizer, "model_max_length"):
+                self.tokenizer.model_max_length = self.model_max_tokens
             print(f"Loaded {model_name} on CPU (max {self.model_max_tokens} tokens)")
         except Exception as e:
             print(f"Error loading model {model_name}: {e}")
@@ -238,8 +249,40 @@ class TransformerSummarizer(BaseSummarizer):
         truncated_ids = token_ids[:max_tokens]
         return self.tokenizer.decode(truncated_ids, skip_special_tokens=True)
 
+    def _prepare_inputs_with_kwargs(self, text: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        Prepare inputs and model-specific generation kwargs.
+
+        Returns:
+            Tuple of (text, generation_kwargs)
+        """
+        kwargs: Dict[str, Any] = {}
+
+        if self.model_key == "bart":
+            # BART's default max_length (142) is too restrictive and causes
+            # mid-sentence truncation. Override it to allow complete sentences.
+            kwargs["max_length"] = 300
+
+        elif self.model_key == "led":
+            # LED pipeline automatically handles global attention on the first token
+            # Just pass text and let the pipeline handle tokenization
+            pass
+
+        elif self.model_key == "bigbird-pegasus":
+            pass
+
+        # Standard models (T5, Pegasus, LongT5) use their defaults
+
+        return text, kwargs
+
     def summarize(self, text: str) -> str:
-        """Generate transformer-based summary."""
+        """
+        Generate transformer-based summary.
+
+        Note: This method does not enforce hard token limits. The model
+        generates summaries using its natural stopping behavior (EOS token).
+        Target lengths in config are informational only for transformers.
+        """
         if not text or not text.strip():
             return ""
 
@@ -267,12 +310,15 @@ class TransformerSummarizer(BaseSummarizer):
                 # Truncate to model's token limit to prevent index errors
                 text = self._truncate_to_token_limit(text)
 
+                # Prepare inputs with model-specific parameters
+                inputs, gen_kwargs = self._prepare_inputs_with_kwargs(text)
+
+                # Generate summary using the pipeline
                 summary = self.summarizer(
-                    text,
-                    max_new_tokens=target_words + 20,
-                    min_length=max(30, target_words - 20),
+                    inputs,
                     do_sample=False,
-                    truncation=True,
+                    truncation=True,  # Only truncate INPUT if needed
+                    **gen_kwargs,
                 )
                 return summary[0]["summary_text"].strip()
 
@@ -307,12 +353,15 @@ class TransformerSummarizer(BaseSummarizer):
 
         for chunk in chunks:
             try:
+                # Prepare inputs with model-specific parameters
+                inputs, gen_kwargs = self._prepare_inputs_with_kwargs(chunk)
+
+                # Generate summary using the pipeline
                 summary = self.summarizer(
-                    chunk,
-                    max_new_tokens=words_per_chunk + 10,
-                    min_length=max(20, words_per_chunk - 10),
+                    inputs,
                     do_sample=False,
                     truncation=True,
+                    **gen_kwargs,
                 )
                 chunk_summaries.append(summary[0]["summary_text"])
             except Exception as e:
@@ -396,7 +445,7 @@ def get_summarizer(config: Dict[str, Any]) -> BaseSummarizer:
         return TextRankSummarizer(config)
     elif method == "lexrank":
         return LexRankSummarizer(config)
-    elif method in ["bart", "t5", "pegasus"]:
+    elif method in ["bart", "t5", "pegasus", "led", "bigbird-pegasus", "longt5"]:
         return TransformerSummarizer(config)
     elif method in ["claude", "gpt"]:
         return LLMSummarizer(config)
@@ -408,7 +457,6 @@ def generate_summaries(
     result_version_id: str,
     summarization_config: Dict[str, Any],
     batch_size: int = 50,
-    random_seed: int = 42,
     limit: Optional[int] = None
 ) -> Dict[str, Any]:
     """
@@ -418,7 +466,6 @@ def generate_summaries(
         result_version_id: UUID of the result version
         summarization_config: Summarization configuration
         batch_size: Number of articles to process in each batch
-        random_seed: Random seed for reproducibility
 
     Returns:
         Dictionary with summary statistics
@@ -443,7 +490,12 @@ def generate_summaries(
 
         # Get articles
         with db.cursor() as cur:
-            query = f"SELECT id, title, content FROM {schema}.news_articles ORDER BY date_posted"
+            query = (
+                f"SELECT id, title, content "
+                f"FROM {schema}.news_articles "
+                f"WHERE is_ditwah_cyclone = 1 "
+                f"ORDER BY date_posted"
+            )
             if limit:
                 query += f" LIMIT {int(limit)}"
             cur.execute(query)
@@ -461,18 +513,15 @@ def generate_summaries(
                 content = article["content"] or ""
                 title = article["title"] or ""
 
-                # Combine title and content
-                full_text = f"{title}\n\n{content}" if title else content
+                full_text = content
 
                 if not full_text.strip():
                     failed += 1
                     continue
 
-                # Measure time
                 start_time = time.time()
 
                 try:
-                    # Generate summary
                     summary_text = summarizer.summarize(full_text)
 
                     if not summary_text:

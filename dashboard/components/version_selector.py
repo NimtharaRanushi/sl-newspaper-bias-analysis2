@@ -92,12 +92,20 @@ def render_create_version_button(analysis_type):
     """Render button to create a new version for a specific analysis type.
 
     Args:
-        analysis_type: 'topics', 'clustering', 'word_frequency', or 'ner'
+        analysis_type: 'topics', 'clustering', 'word_frequency', 'ner', or 'summarization'
     """
     # Format analysis type for display
     display_name = analysis_type.replace('_', ' ').title()
 
-    if st.button(f"➕ Create New {display_name} Version", key=f"create_{analysis_type}_btn"):
+    # Check if we should open the dialog
+    dialog_key = f"create_{analysis_type}_dialog"
+    should_open_dialog = st.button(f"➕ Create New {display_name} Version", key=f"create_{analysis_type}_btn")
+
+    # Also open if version was just created (to show success message)
+    if dialog_key in st.session_state and st.session_state[dialog_key].get("created"):
+        should_open_dialog = True
+
+    if should_open_dialog:
         render_create_version_dialog(analysis_type)
 
 

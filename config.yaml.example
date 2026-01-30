@@ -39,3 +39,18 @@ clustering:
   similarity_threshold: 0.8
   min_cluster_size: 2
   time_window_days: 7
+
+# Summarization
+summarization:
+  method: textrank  # textrank | lexrank | bart | t5 | pegasus | led | longt5 | bigbird-pegasus | claude | gpt
+  summary_length: medium  # short | medium | long
+  short_sentences: 3
+  short_words: 50
+  medium_sentences: 5
+  medium_words: 100
+  long_sentences: 8
+  long_words: 150
+  max_input_length: 1024  # Max tokens for standard models (ignored for long-context models)
+  chunk_long_articles: true  # Split articles longer than max_input_length
+  llm_model: claude-sonnet-4-20250514  # Used when method is 'claude' or 'gpt'
+  llm_temperature: 0.0
