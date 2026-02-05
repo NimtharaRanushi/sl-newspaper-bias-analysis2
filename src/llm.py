@@ -2,6 +2,7 @@
 
 import os
 import json
+import time
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -131,6 +132,100 @@ class OpenAILLM(BaseLLM):
             },
             model=self.model,
             provider="openai"
+        )
+
+
+class MistralLLM(BaseLLM):
+    """Mistral AI client with rate limit retry logic."""
+
+    def __init__(self, model: str = "mistral-large-latest", **kwargs):
+        super().__init__(model, **kwargs)
+        from mistralai import Mistral
+        api_key = os.environ.get("MISTRAL_API_KEY")
+        if not api_key:
+            raise ValueError("MISTRAL_API_KEY environment variable not set")
+        self.client = Mistral(api_key=api_key)
+
+    def _call_with_retry(
+        self,
+        messages: List[Dict[str, str]],
+        json_mode: bool = False,
+        max_retries: int = 5
+    ) -> Any:
+        """
+        Call Mistral API with exponential backoff retry logic for rate limiting.
+
+        Args:
+            messages: List of message dicts with role and content
+            json_mode: Whether to use JSON response format
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            API response object
+
+        Raises:
+            Exception: After max retries exceeded
+        """
+        from mistralai.models import SDKError
+
+        for attempt in range(max_retries):
+            try:
+                kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens
+                }
+
+                if json_mode:
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                response = self.client.chat.complete(**kwargs)
+                return response
+
+            except SDKError as e:
+                # Check for rate limit error (429)
+                if hasattr(e, 'status_code') and e.status_code == 429:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                        wait_time = 2 ** attempt
+                        print(f"  Rate limit hit, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise Exception(f"Max retries ({max_retries}) exceeded for rate limiting")
+                else:
+                    # Non-rate-limit error, raise immediately
+                    raise
+            except Exception as e:
+                # Unknown error, raise immediately
+                raise
+
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        json_mode: bool = False
+    ) -> LLMResponse:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        if json_mode and system_prompt is None:
+            # Add JSON instruction if not already in system prompt
+            messages.insert(0, {"role": "system", "content": "Respond only with valid JSON, no other text."})
+
+        response = self._call_with_retry(messages, json_mode=json_mode)
+
+        return LLMResponse(
+            content=response.choices[0].message.content,
+            usage={
+                "input_tokens": response.usage.prompt_tokens,
+                "output_tokens": response.usage.completion_tokens
+            },
+            model=self.model,
+            provider="mistral"
         )
 
 
@@ -362,6 +457,8 @@ def get_llm(config: dict = None) -> BaseLLM:
         return OpenAILLM(model=model, temperature=temperature, max_tokens=max_tokens)
     elif provider == "gemini":
         return GeminiLLM(model=model, temperature=temperature, max_tokens=max_tokens)
+    elif provider == "mistral":
+        return MistralLLM(model=model, temperature=temperature, max_tokens=max_tokens)
     elif provider == "local":
         base_url = config.get("base_url", "http://localhost:11434")
         return LocalLLM(model=model, base_url=base_url, temperature=temperature, max_tokens=max_tokens)
