@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS media_bias.result_versions (
     configuration JSONB NOT NULL,
     analysis_type VARCHAR(50) NOT NULL DEFAULT 'combined',
     is_complete BOOLEAN DEFAULT false,
-    pipeline_status JSONB DEFAULT '{"embeddings": false, "topics": false, "clustering": false, "word_frequency": false, "ner": false, "summarization": false}'::jsonb,
+    pipeline_status JSONB DEFAULT '{"embeddings": false, "topics": false, "clustering": false, "word_frequency": false, "ner": false, "summarization": false, "ditwah": false, "ditwah_claims": false}'::jsonb,
     model_data BYTEA,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
@@ -256,3 +256,180 @@ CREATE TABLE IF NOT EXISTS media_bias.article_summaries (
 CREATE INDEX IF NOT EXISTS idx_article_summaries_article ON media_bias.article_summaries(article_id);
 CREATE INDEX IF NOT EXISTS idx_article_summaries_version ON media_bias.article_summaries(result_version_id);
 CREATE INDEX IF NOT EXISTS idx_article_summaries_method ON media_bias.article_summaries(result_version_id, method);
+
+-- Ditwah Hurricane Hypothesis Analysis
+-- Hypotheses for Ditwah analysis
+CREATE TABLE IF NOT EXISTS media_bias.ditwah_hypotheses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    hypothesis_key VARCHAR(20) NOT NULL,  -- 'h1', 'h2', etc.
+    statement TEXT NOT NULL,
+    category VARCHAR(50),  -- 'government_response', 'international_aid', etc.
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(result_version_id, hypothesis_key)
+);
+
+-- Stance analysis results per article-hypothesis pair
+CREATE TABLE IF NOT EXISTS media_bias.ditwah_analyses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
+    hypothesis_id UUID NOT NULL REFERENCES media_bias.ditwah_hypotheses(id) ON DELETE CASCADE,
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    agreement_score FLOAT NOT NULL,  -- -1.0 (disagree) to +1.0 (agree)
+    confidence FLOAT NOT NULL,       -- 0 to 1
+    stance VARCHAR(30) NOT NULL,     -- 'strongly_agree', 'agree', 'neutral', 'disagree', 'strongly_disagree'
+    reasoning TEXT,
+    supporting_quotes JSONB,         -- Array of quote strings
+    llm_provider VARCHAR(50),
+    llm_model VARCHAR(100),
+    processed_at TIMESTAMP DEFAULT NOW(),
+    processing_time_ms INTEGER,
+    UNIQUE(article_id, hypothesis_id, result_version_id)
+);
+
+-- Indexes for Ditwah tables
+CREATE INDEX IF NOT EXISTS idx_ditwah_hypotheses_version ON media_bias.ditwah_hypotheses(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_ditwah_analyses_version ON media_bias.ditwah_analyses(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_ditwah_analyses_article ON media_bias.ditwah_analyses(article_id);
+CREATE INDEX IF NOT EXISTS idx_ditwah_analyses_hypothesis ON media_bias.ditwah_analyses(hypothesis_id);
+
+-- Aggregated view by source
+CREATE MATERIALIZED VIEW IF NOT EXISTS media_bias.ditwah_by_source AS
+SELECT
+    da.result_version_id,
+    h.hypothesis_key,
+    h.statement,
+    n.source_id,
+    AVG(da.agreement_score) as avg_agreement,
+    STDDEV(da.agreement_score) as stddev_agreement,
+    AVG(da.confidence) as avg_confidence,
+    COUNT(*) as article_count,
+    COUNT(*) FILTER (WHERE da.stance IN ('strongly_agree', 'agree')) as agree_count,
+    COUNT(*) FILTER (WHERE da.stance = 'neutral') as neutral_count,
+    COUNT(*) FILTER (WHERE da.stance IN ('disagree', 'strongly_disagree')) as disagree_count
+FROM media_bias.ditwah_analyses da
+JOIN media_bias.ditwah_hypotheses h ON da.hypothesis_id = h.id
+JOIN media_bias.news_articles n ON da.article_id = n.id
+GROUP BY da.result_version_id, h.hypothesis_key, h.statement, n.source_id;
+
+CREATE INDEX IF NOT EXISTS idx_ditwah_by_source_version ON media_bias.ditwah_by_source(result_version_id);
+
+-- Ditwah Claims Analysis (automatic claim generation + sentiment + stance)
+-- Add boolean column to mark Ditwah articles
+ALTER TABLE media_bias.news_articles
+ADD COLUMN IF NOT EXISTS is_ditwah_cyclone BOOLEAN DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_news_articles_ditwah ON media_bias.news_articles(is_ditwah_cyclone)
+WHERE is_ditwah_cyclone = TRUE;
+
+-- Individual article claims (step 1 of two-step process)
+CREATE TABLE IF NOT EXISTS media_bias.ditwah_article_claims (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id) ON DELETE CASCADE,
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    claim_text TEXT NOT NULL,
+    general_claim_id UUID,  -- Will reference ditwah_claims after clustering
+    llm_provider VARCHAR(50),
+    llm_model VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(article_id, result_version_id)
+);
+
+COMMENT ON TABLE media_bias.ditwah_article_claims IS
+  'Individual claims generated for each DITWAH article (step 1: one claim per article)';
+
+COMMENT ON COLUMN media_bias.ditwah_article_claims.general_claim_id IS
+  'Links to the general claim this individual claim was clustered into (step 2)';
+
+-- General claims table (step 2: clustered from individual claims)
+CREATE TABLE IF NOT EXISTS media_bias.ditwah_claims (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    claim_text TEXT NOT NULL,
+    claim_category VARCHAR(100),
+    claim_order INTEGER,  -- Display order
+    article_count INTEGER,  -- How many articles mention this (via individual claims)
+    individual_claims_count INTEGER DEFAULT 0,  -- How many individual claims clustered here
+    representative_article_id UUID REFERENCES media_bias.news_articles(id),  -- Best example article
+    llm_provider VARCHAR(50),
+    llm_model VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(result_version_id, claim_text)
+);
+
+COMMENT ON TABLE media_bias.ditwah_claims IS
+  'General claims created by clustering similar individual article claims (max ~40 general claims)';
+
+COMMENT ON COLUMN media_bias.ditwah_claims.representative_article_id IS
+  'Article that best represents this general claim';
+
+-- Add foreign key constraint after both tables exist
+ALTER TABLE media_bias.ditwah_article_claims
+ADD CONSTRAINT fk_general_claim
+FOREIGN KEY (general_claim_id) REFERENCES media_bias.ditwah_claims(id) ON DELETE SET NULL;
+
+-- Sentiment analysis for claims (links to existing sentiment_analyses table)
+CREATE TABLE IF NOT EXISTS media_bias.claim_sentiment (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES media_bias.ditwah_claims(id) ON DELETE CASCADE,
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
+    source_id VARCHAR(50) NOT NULL,
+    -- Sentiment from existing models
+    sentiment_score FLOAT,  -- -5 to +5 from primary model
+    sentiment_model VARCHAR(50),  -- Which model
+    UNIQUE(claim_id, article_id)
+);
+
+-- Stance analysis for claims (new LLM analysis)
+CREATE TABLE IF NOT EXISTS media_bias.claim_stance (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES media_bias.ditwah_claims(id) ON DELETE CASCADE,
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
+    source_id VARCHAR(50) NOT NULL,
+    -- Stance from LLM
+    stance_score FLOAT,  -- -1 (disagree) to +1 (agree)
+    stance_label VARCHAR(50),  -- 'strongly_agree', 'agree', 'neutral', 'disagree', 'strongly_disagree'
+    confidence FLOAT,  -- 0-1
+    reasoning TEXT,
+    supporting_quotes JSONB,
+    llm_provider VARCHAR(50),
+    llm_model VARCHAR(100),
+    processed_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(claim_id, article_id)
+);
+
+-- Indexes for article claims
+CREATE INDEX IF NOT EXISTS idx_article_claims_article ON media_bias.ditwah_article_claims(article_id);
+CREATE INDEX IF NOT EXISTS idx_article_claims_version ON media_bias.ditwah_article_claims(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_article_claims_general ON media_bias.ditwah_article_claims(general_claim_id);
+
+-- Indexes for general claims
+CREATE INDEX IF NOT EXISTS idx_ditwah_claims_version ON media_bias.ditwah_claims(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_ditwah_claims_representative ON media_bias.ditwah_claims(representative_article_id);
+
+-- Indexes for claim sentiment and stance
+CREATE INDEX IF NOT EXISTS idx_claim_sentiment_claim ON media_bias.claim_sentiment(claim_id);
+CREATE INDEX IF NOT EXISTS idx_claim_sentiment_source ON media_bias.claim_sentiment(claim_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_claim_stance_claim ON media_bias.claim_stance(claim_id);
+CREATE INDEX IF NOT EXISTS idx_claim_stance_source ON media_bias.claim_stance(claim_id, source_id);
+
+-- View: Individual → General claim hierarchy
+CREATE OR REPLACE VIEW media_bias.ditwah_claims_hierarchy AS
+SELECT
+    ac.id as individual_claim_id,
+    ac.article_id,
+    ac.claim_text as individual_claim,
+    gc.id as general_claim_id,
+    gc.claim_text as general_claim,
+    gc.claim_category,
+    n.title as article_title,
+    n.source_id,
+    n.date_posted,
+    ac.result_version_id
+FROM media_bias.ditwah_article_claims ac
+LEFT JOIN media_bias.ditwah_claims gc ON ac.general_claim_id = gc.id
+LEFT JOIN media_bias.news_articles n ON ac.article_id = n.id
+ORDER BY gc.claim_order, ac.created_at;
+
+COMMENT ON VIEW media_bias.ditwah_claims_hierarchy IS
+  'Shows the mapping from individual article claims to general claims for analysis';

@@ -185,6 +185,98 @@ def get_default_summarization_config() -> Dict[str, Any]:
     }
 
 
+def get_default_ditwah_config() -> Dict[str, Any]:
+    """
+    Get default configuration for Ditwah analysis.
+
+    Returns:
+        Dictionary with configuration for Ditwah hypothesis stance analysis.
+    """
+    config = load_config()
+
+    return {
+        "random_seed": 42,
+        "ditwah": {
+            "hypotheses": [
+                {
+                    "key": "h1",
+                    "statement": "The government's disaster response to Cyclone Ditwah was adequate and timely",
+                    "category": "government_response"
+                },
+                {
+                    "key": "h2",
+                    "statement": "International aid was crucial in addressing the cyclone's aftermath",
+                    "category": "international_aid"
+                },
+                {
+                    "key": "h3",
+                    "statement": "The economic impact of Cyclone Ditwah will have long-term consequences for Sri Lanka",
+                    "category": "economic_impact"
+                },
+                {
+                    "key": "h4",
+                    "statement": "The cyclone's impact was exacerbated by inadequate infrastructure and preparedness",
+                    "category": "preparedness"
+                },
+                {
+                    "key": "h5",
+                    "statement": "Climate change played a significant role in the intensity of Cyclone Ditwah",
+                    "category": "climate_change"
+                }
+            ],
+            "llm": {
+                "provider": config["llm"].get("provider", "local"),
+                "model": config["llm"].get("model", "llama3.1:70b"),
+                "base_url": "http://localhost:11434",
+                "temperature": 0.0,
+                "max_tokens": 1000
+            },
+            "batch_size": 5
+        }
+    }
+
+
+def get_default_ditwah_claims_config() -> Dict[str, Any]:
+    """
+    Get default configuration for Ditwah claims analysis.
+
+    Returns:
+        Dictionary with configuration for automatic claim generation + sentiment + stance.
+    """
+    config = load_config()
+
+    # Use ditwah_claims config if available, otherwise fall back to defaults
+    ditwah_config = config.get("ditwah_claims", {})
+
+    return {
+        "random_seed": 42,
+        "generation": ditwah_config.get("generation", {
+            "min_articles": 5,  # Minimum articles per claim
+            "categories": [
+                "government_response",
+                "humanitarian_aid",
+                "infrastructure_damage",
+                "economic_impact",
+                "international_response",
+                "casualties_and_displacement"
+            ]
+        }),
+        "llm": ditwah_config.get("llm", {
+            "provider": config["llm"].get("provider", "mistral"),
+            "model": config["llm"].get("model", "mistral-large-latest"),
+            "temperature": 0.3,
+            "max_tokens": 4000
+        }),
+        "sentiment": ditwah_config.get("sentiment", {
+            "primary_model": "roberta"
+        }),
+        "stance": ditwah_config.get("stance", {
+            "batch_size": 5,
+            "temperature": 0.0
+        })
+    }
+
+
 def create_version(
     name: str,
     description: str = "",
@@ -206,7 +298,7 @@ def create_version(
     Raises:
         ValueError: If version name already exists for the same analysis type
     """
-    valid_types = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'combined']
+    valid_types = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', 'ditwah_claims', 'combined']
     if analysis_type not in valid_types:
         raise ValueError(f"Invalid analysis_type: {analysis_type}. Must be one of {valid_types}")
 
@@ -438,10 +530,10 @@ def update_pipeline_status(
 
     Args:
         version_id: UUID of the version
-        step: Pipeline step name ('embeddings', 'topics', 'clustering', 'word_frequency', 'ner', or 'summarization')
+        step: Pipeline step name ('embeddings', 'topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', or 'ditwah_claims')
         complete: Whether the step is complete
     """
-    valid_steps = ['embeddings', 'topics', 'clustering', 'word_frequency', 'ner', 'summarization']
+    valid_steps = ['embeddings', 'topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', 'ditwah_claims']
     if step not in valid_steps:
         raise ValueError(f"Invalid step: {step}. Must be one of {valid_steps}")
 
@@ -469,6 +561,8 @@ def update_pipeline_status(
             # For 'word_frequency': check word_frequency only (no embeddings needed)
             # For 'ner': check ner only (no embeddings needed)
             # For 'summarization': check summarization only (no embeddings needed)
+            # For 'ditwah': check ditwah only (no embeddings needed)
+            # For 'ditwah_claims': check ditwah_claims only (no embeddings needed)
             # For 'combined': check all three (backward compatibility)
             cur.execute(
                 f"""
@@ -487,6 +581,10 @@ def update_pipeline_status(
                             (pipeline_status->>'ner')::boolean
                         WHEN 'summarization' THEN
                             (pipeline_status->>'summarization')::boolean
+                        WHEN 'ditwah' THEN
+                            (pipeline_status->>'ditwah')::boolean
+                        WHEN 'ditwah_claims' THEN
+                            (pipeline_status->>'ditwah_claims')::boolean
                         WHEN 'combined' THEN
                             (pipeline_status->>'embeddings')::boolean AND
                             (pipeline_status->>'topics')::boolean AND
