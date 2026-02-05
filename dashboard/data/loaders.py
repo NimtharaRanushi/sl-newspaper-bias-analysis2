@@ -595,7 +595,7 @@ def load_summaries(version_id=None, source_id=None, limit=100):
                     FROM {schema}.article_summaries s
                     JOIN {schema}.news_articles a ON s.article_id = a.id
                     WHERE s.result_version_id = %s AND a.source_id = %s
-                    ORDER BY a.date_posted DESC
+                    ORDER BY a.id
                     LIMIT %s
                 """, (version_id, source_id, limit))
             else:
@@ -620,7 +620,7 @@ def load_summaries(version_id=None, source_id=None, limit=100):
                     FROM {schema}.article_summaries s
                     JOIN {schema}.news_articles a ON s.article_id = a.id
                     WHERE s.result_version_id = %s
-                    ORDER BY a.date_posted DESC
+                    ORDER BY a.id
                     LIMIT %s
                 """, (version_id, limit))
             return cur.fetchall()
