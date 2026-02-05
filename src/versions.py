@@ -592,6 +592,14 @@ def get_version_statistics(version_id: str) -> Dict[str, int]:
             )
             stats["article_clusters"] = cur.fetchone()["count"]
 
+        # Count article summaries
+        with db.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) as count FROM {schema}.article_summaries WHERE result_version_id = %s",
+                (version_id,)
+            )
+            stats["article_summaries"] = cur.fetchone()["count"]
+
         return stats
 
 
