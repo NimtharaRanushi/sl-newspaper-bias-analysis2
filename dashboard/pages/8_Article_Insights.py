@@ -18,6 +18,7 @@ from data.loaders import (
     load_article_summary,
     load_article_entities,
     load_article_cluster,
+    load_event_details,
     get_available_sentiment_models
 )
 from components.source_mapping import SOURCE_NAMES
@@ -376,6 +377,38 @@ if clustering_versions:
         if cluster.get('date_start') and cluster.get('date_end'):
             date_range = f"{cluster['date_start'].strftime('%Y-%m-%d')} to {cluster['date_end'].strftime('%Y-%m-%d')}"
             st.markdown(f"**Event Period:** {date_range}")
+
+        # Load and display articles in this cluster
+        cluster_articles = load_event_details(cluster['cluster_id'], clustering_version_id)
+
+        if cluster_articles:
+            st.markdown("**Articles in this cluster:**")
+
+            # Create a dataframe for better display
+            articles_data = []
+            for art in cluster_articles:
+                source_name = SOURCE_NAMES.get(art['source_id'], art['source_id'])
+                date_str = art['date_posted'].strftime('%Y-%m-%d') if art['date_posted'] else 'Unknown'
+                articles_data.append({
+                    'Title': art['title'],
+                    'Source': source_name,
+                    'Date': date_str,
+                    'URL': art['url'] if art['url'] else ''
+                })
+
+            # Display as dataframe
+            df = pd.DataFrame(articles_data)
+
+            # Make clickable links in the dataframe
+            st.dataframe(
+                df,
+                column_config={
+                    "URL": st.column_config.LinkColumn("URL", display_text="View"),
+                    "Title": st.column_config.TextColumn("Title", width="large"),
+                },
+                hide_index=True,
+                use_container_width=True
+            )
     else:
         st.info("Article is not part of any event cluster (outlier)")
 else:
