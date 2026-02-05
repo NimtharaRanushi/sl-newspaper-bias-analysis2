@@ -3,7 +3,7 @@
 CLI tool for managing result versions.
 
 Usage:
-  python3 scripts/manage_versions.py list [--type topics|clustering|word_frequency]
+  python3 scripts/manage_versions.py list [--type topics|clustering|summarization|word_frequency]
   python3 scripts/manage_versions.py delete <version_id>
   python3 scripts/manage_versions.py stats <version_id>
 """
@@ -88,6 +88,7 @@ def show_stats_cmd(version_id: str):
     print(f"  Article Analyses: {stats['article_analysis']:,}")
     print(f"  Event Clusters: {stats['event_clusters']:,}")
     print(f"  Article-Cluster Mappings: {stats['article_clusters']:,}")
+    print(f"  Article Summaries: {stats['article_summaries']:,}")
     print(f"\n  TOTAL RECORDS: {sum(stats.values()):,}")
     print("="*60)
 
@@ -131,7 +132,7 @@ Examples:
     list_parser = subparsers.add_parser('list', help='List all versions')
     list_parser.add_argument(
         '--type',
-        choices=['topics', 'clustering', 'word_frequency', 'combined'],
+        choices=['topics', 'clustering', 'summarization', 'word_frequency', 'combined'],
         help='Filter by analysis type'
     )
 
