@@ -239,8 +239,12 @@ if topic_data and sentiment:
         sentiment_df = pd.DataFrame(topic_sentiment_data)
         sentiment_df['source_name'] = sentiment_df['source_id'].map(SOURCE_NAMES)
 
-        # Sort by average sentiment (highest first)
-        sentiment_df = sentiment_df.sort_values('avg_sentiment', ascending=False)
+        # Sort by a fixed order (using SOURCE_COLORS keys to maintain consistency)
+        source_order = list(SOURCE_COLORS.keys())
+        sentiment_df['source_order'] = sentiment_df['source_name'].apply(
+            lambda x: source_order.index(x) if x in source_order else 999
+        )
+        sentiment_df = sentiment_df.sort_values('source_order')
 
         # Create horizontal bar chart
         fig = go.Figure()
@@ -275,7 +279,7 @@ if topic_data and sentiment:
             height=300,  # Increased height for better spacing
             xaxis_range=[-5, 5],
             showlegend=False,
-            yaxis={'categoryorder': 'total ascending'}
+            yaxis={'categoryorder': 'array', 'categoryarray': sentiment_df['source_name'].tolist()}
         )
 
         st.plotly_chart(fig, use_container_width=True)
