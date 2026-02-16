@@ -204,12 +204,12 @@ def load_sentiment_timeline(model_type: str):
 
 
 @st.cache_data(ttl=300)
-def load_topic_sentiment(model_type: str):
+def load_topic_sentiment(model_type: str, version_id=None):
     """Load sentiment by topic."""
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
-            cur.execute(f"""
+            query = f"""
                 SELECT
                     t.name as topic,
                     n.source_id,
@@ -220,9 +220,20 @@ def load_topic_sentiment(model_type: str):
                 JOIN {schema}.article_analysis aa ON sa.article_id = aa.article_id
                 JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                 WHERE sa.model_type = %s AND t.topic_id != -1
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
+            """
+            params = [model_type]
+
+            if version_id:
+                query += " AND aa.result_version_id = %s AND t.result_version_id = %s"
+                params.extend([version_id, version_id])
+
+            query += """
                 GROUP BY t.name, n.source_id
                 HAVING COUNT(*) >= 5
-            """, (model_type,))
+            """
+            cur.execute(query, tuple(params))
             return cur.fetchall()
 
 
@@ -242,23 +253,32 @@ def load_available_models():
 
 
 @st.cache_data(ttl=300)
-def load_topic_list():
+def load_topic_list(version_id=None):
     """Get list of topics for dropdown."""
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
-            cur.execute(f"""
-                SELECT name, article_count
-                FROM {schema}.topics
-                WHERE topic_id != -1
-                ORDER BY article_count DESC
-                LIMIT 50
-            """)
+            if version_id:
+                cur.execute(f"""
+                    SELECT name, description, article_count
+                    FROM {schema}.topics
+                    WHERE topic_id != -1 AND result_version_id = %s
+                    ORDER BY article_count DESC
+                    LIMIT 50
+                """, (version_id,))
+            else:
+                cur.execute(f"""
+                    SELECT name, description, article_count
+                    FROM {schema}.topics
+                    WHERE topic_id != -1
+                    ORDER BY article_count DESC
+                    LIMIT 50
+                """)
             return cur.fetchall()
 
 
 @st.cache_data(ttl=300)
-def load_sentiment_by_source_topic(model_type: str, topic: str = None):
+def load_sentiment_by_source_topic(model_type: str, topic: str = None, version_id=None):
     """Load sentiment by source, optionally filtered by topic."""
     with get_db() as db:
         schema = db.config["schema"]
@@ -278,20 +298,27 @@ def load_sentiment_by_source_topic(model_type: str, topic: str = None):
                     JOIN {schema}.article_analysis aa ON sa.article_id = aa.article_id
                     JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                     WHERE sa.model_type = %s AND t.name = %s
+                      AND n.is_ditwah_cyclone = 1
+                      AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
                 """
-                params = (model_type, topic)
+                params = [model_type, topic]
+                if version_id:
+                    query += " AND aa.result_version_id = %s AND t.result_version_id = %s"
+                    params.extend([version_id, version_id])
             else:
                 query += " WHERE sa.model_type = %s"
-                params = (model_type,)
+                query += " AND n.is_ditwah_cyclone = 1"
+                query += " AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'"
+                params = [model_type]
 
             query += " GROUP BY n.source_id ORDER BY avg_sentiment DESC"
 
-            cur.execute(query, params)
+            cur.execute(query, tuple(params))
             return cur.fetchall()
 
 
 @st.cache_data(ttl=300)
-def load_sentiment_percentage_by_source_topic(model_type: str, topic: str = None):
+def load_sentiment_percentage_by_source_topic(model_type: str, topic: str = None, version_id=None):
     """Load sentiment percentage distribution by source with optional topic filter."""
     with get_db() as db:
         schema = db.config["schema"]
@@ -312,20 +339,27 @@ def load_sentiment_percentage_by_source_topic(model_type: str, topic: str = None
                     JOIN {schema}.article_analysis aa ON sa.article_id = aa.article_id
                     JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                     WHERE sa.model_type = %s AND t.name = %s
+                      AND n.is_ditwah_cyclone = 1
+                      AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
                 """
-                params = (model_type, topic)
+                params = [model_type, topic]
+                if version_id:
+                    query += " AND aa.result_version_id = %s AND t.result_version_id = %s"
+                    params.extend([version_id, version_id])
             else:
                 query += " WHERE sa.model_type = %s"
-                params = (model_type,)
+                query += " AND n.is_ditwah_cyclone = 1"
+                query += " AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'"
+                params = [model_type]
 
             query += " GROUP BY n.source_id ORDER BY n.source_id"
 
-            cur.execute(query, params)
+            cur.execute(query, tuple(params))
             return cur.fetchall()
 
 
 @st.cache_data(ttl=300)
-def load_multi_model_comparison(models: list, topic: str = None):
+def load_multi_model_comparison(models: list, topic: str = None, version_id=None):
     """Load sentiment data for multiple models with optional topic filter."""
     with get_db() as db:
         schema = db.config["schema"]
@@ -341,8 +375,15 @@ def load_multi_model_comparison(models: list, topic: str = None):
                 LEFT JOIN {schema}.article_analysis aa ON sa.article_id = aa.article_id
                 LEFT JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                 WHERE sa.model_type = ANY(%s)
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
             """
             params = [models]
+
+            if version_id:
+                query += " AND (aa.result_version_id = %s OR aa.result_version_id IS NULL)"
+                query += " AND (t.result_version_id = %s OR t.result_version_id IS NULL)"
+                params.extend([version_id, version_id])
 
             if topic and topic != "All Topics":
                 query += " AND t.name = %s"
