@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import json as _json
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -26,27 +27,47 @@ from components.charts import (
     render_source_model_comparison,
     render_model_agreement_heatmap,
 )
+from components.version_selector import render_version_selector
 from components.styling import apply_page_style
 
 apply_page_style()
 
-st.title("Sentiment Analysis - Multi-Model Comparison")
+st.title("Sentiment Analysis")
 
 # Load available data
 available_models = load_available_models()
-topics = load_topic_list()
 
 if not available_models:
     st.warning("No sentiment analysis data found. Run `python scripts/04_analyze_sentiment.py` first.")
     st.stop()
 
+# Topic version selector
+version_id = render_version_selector('topics')
+
 # Topic selector in main area
-topic_options = ["All Topics"] + [t['name'] for t in topics]
-selected_topic = st.selectbox(
+topics = load_topic_list(version_id)
+
+def _topic_display_name(t):
+    """Return LLM aspect label if available, otherwise keyword name."""
+    try:
+        if t.get('description'):
+            desc_data = _json.loads(t['description'])
+            if desc_data.get('aspect'):
+                return desc_data['aspect']
+    except (ValueError, TypeError):
+        pass
+    return t['name']
+
+# Build display_name -> keyword name mapping for downstream queries
+topic_display_map = {_topic_display_name(t): t['name'] for t in topics}
+topic_options = ["All Topics"] + list(topic_display_map.keys())
+selected_display_topic = st.selectbox(
     "Filter by Topic",
     options=topic_options,
     help="Filter all visualizations by topic"
 )
+# Resolve back to keyword name for DB queries
+selected_topic = topic_display_map.get(selected_display_topic, selected_display_topic)
 
 # Show available models in an expander
 model_list = [m['model_type'] for m in available_models]
@@ -92,11 +113,11 @@ if view_mode == "Single Model View":
     )
 
     st.markdown(f"### {MODEL_DISPLAY_NAMES.get(selected_model, selected_model.upper())} Analysis")
-    if selected_topic != "All Topics":
-        st.caption(f"Filtered by topic: **{selected_topic}**")
+    if selected_display_topic != "All Topics":
+        st.caption(f"Filtered by topic: **{selected_display_topic}**")
 
     # Load data with topic filter
-    sentiment_data = load_sentiment_by_source_topic(selected_model, selected_topic)
+    sentiment_data = load_sentiment_by_source_topic(selected_model, selected_topic, version_id)
 
     if not sentiment_data:
         st.warning(f"No data for {selected_model} with topic '{selected_topic}'")
@@ -106,7 +127,7 @@ if view_mode == "Single Model View":
     st.markdown("#### Sentiment Distribution by Source")
     st.caption("Percentage of articles in each sentiment category")
 
-    pct_data = load_sentiment_percentage_by_source_topic(selected_model, selected_topic)
+    pct_data = load_sentiment_percentage_by_source_topic(selected_model, selected_topic, version_id)
     if pct_data:
         pct_df = pd.DataFrame(pct_data)
         pct_df['source_name'] = pct_df['source_id'].map(SOURCE_NAMES)
@@ -235,7 +256,7 @@ if view_mode == "Single Model View":
 
     # 5. Topic-Sentiment Heatmap
     st.markdown("#### Topic Sentiment by Source")
-    topic_sentiment = load_topic_sentiment(selected_model)
+    topic_sentiment = load_topic_sentiment(selected_model, version_id)
     if topic_sentiment:
         ts_df = pd.DataFrame(topic_sentiment)
         ts_df['source_name'] = ts_df['source_id'].map(SOURCE_NAMES)
@@ -259,8 +280,8 @@ if view_mode == "Single Model View":
             y=pivot.index,
             colorscale='RdYlGn',
             zmid=0,
-            zmin=-3,
-            zmax=3,
+            zmin=-5,
+            zmax=5,
             colorbar=dict(title="Sentiment")
         ))
         fig.update_layout(
@@ -273,11 +294,11 @@ if view_mode == "Single Model View":
 else:
     # Model Comparison View
     st.markdown("### Model Comparison")
-    if selected_topic != "All Topics":
-        st.caption(f"Filtered by topic: **{selected_topic}**")
+    if selected_display_topic != "All Topics":
+        st.caption(f"Filtered by topic: **{selected_display_topic}**")
 
     # Load multi-model data
-    comparison_data = load_multi_model_comparison(model_list, selected_topic)
+    comparison_data = load_multi_model_comparison(model_list, selected_topic, version_id)
 
     if not comparison_data:
         st.warning("No comparison data available")
