@@ -416,6 +416,187 @@ def load_topic_by_source(version_id=None):
 
 
 @st.cache_data(ttl=300)
+def load_topics_with_keywords(version_id, limit=15):
+    """Load top topics with keywords for selection bias analysis.
+
+    Returns:
+        List of dicts with keys: id, topic_id, name, description, keywords, article_count
+    """
+    if not version_id:
+        return []
+
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT id, topic_id, name, description, keywords, article_count
+                FROM {schema}.topics
+                WHERE topic_id != -1 AND result_version_id = %s
+                ORDER BY article_count DESC
+                LIMIT %s
+            """, (version_id, limit))
+            return cur.fetchall()
+
+
+@st.cache_data(ttl=300)
+def load_representative_articles(version_id, topic_db_id, limit=10):
+    """Load most representative articles for a topic.
+
+    Args:
+        version_id: The topic version ID
+        topic_db_id: The database primary key (id) of the topic
+        limit: Max articles to return
+
+    Returns:
+        List of dicts with keys: title, content_excerpt, source_id
+    """
+    if not version_id or not topic_db_id:
+        return []
+
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT
+                    n.title,
+                    LEFT(n.content, 500) as content_excerpt,
+                    n.source_id
+                FROM {schema}.article_analysis aa
+                JOIN {schema}.news_articles n ON aa.article_id = n.id
+                WHERE aa.primary_topic_id = %s
+                  AND aa.result_version_id = %s
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
+                ORDER BY RANDOM()
+                LIMIT %s
+            """, (topic_db_id, version_id, limit))
+            return cur.fetchall()
+
+
+@st.cache_data(ttl=300)
+def load_outlet_totals():
+    """Load total article counts per outlet (Ditwah articles only).
+
+    Returns:
+        Dict mapping source_id to article count.
+    """
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT source_id, COUNT(*) as count
+                FROM {schema}.news_articles
+                WHERE is_ditwah_cyclone = 1
+                  AND date_posted >= '2025-11-22' AND date_posted <= '2025-12-31'
+                GROUP BY source_id
+            """)
+            rows = cur.fetchall()
+            return {r['source_id']: r['count'] for r in rows}
+
+
+def generate_topic_aspects(version_id, topics_with_keywords, force=False):
+    """Generate LLM aspect labels for topics and store in DB.
+
+    Args:
+        version_id: The topic version ID
+        topics_with_keywords: List from load_topics_with_keywords()
+        force: If True, regenerate even if aspects already exist
+
+    Returns:
+        Number of topics successfully labelled
+    """
+    import json
+    from src.llm import get_llm
+
+    llm = get_llm()
+
+    system_prompt = (
+        "You are an expert media analyst studying how Sri Lankan English newspapers "
+        "covered Cyclone Ditwah (November 2025 - December 2025). The cyclone caused "
+        "significant damage in Sri Lanka, triggering government response, international "
+        "aid, and extensive media coverage across multiple outlets.\n\n"
+        "You are analysing topics discovered by BERTopic from the full corpus of articles. "
+        "For each topic, you will receive its top keywords (with importance scores) and "
+        "representative article titles and excerpts.\n\n"
+        "Your task is to identify what specific aspect of the Ditwah cyclone event this "
+        "topic captures."
+    )
+
+    success_count = 0
+
+    with get_db() as db:
+        schema = db.config["schema"]
+
+        for topic in topics_with_keywords:
+            # Skip if already has an aspect label (unless force=True)
+            if not force and topic.get('description'):
+                try:
+                    existing = json.loads(topic['description'])
+                    if existing.get('aspect'):
+                        success_count += 1
+                        continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Build keyword section
+            keywords = topic.get('keywords') or []
+            kw_section = "\n".join(f"  - {kw}" for kw in keywords[:20])
+
+            # Get representative articles
+            rep_articles = load_representative_articles(version_id, topic['id'], limit=10)
+            art_lines = []
+            for i, art in enumerate(rep_articles, 1):
+                excerpt = (art['content_excerpt'] or '')[:200].replace('\n', ' ')
+                art_lines.append(f"  {i}. [{art['source_id']}] {art['title']}\n     {excerpt}...")
+            art_section = "\n".join(art_lines)
+
+            prompt = (
+                f"Below is a topic discovered from Sri Lankan newspaper coverage of Cyclone Ditwah.\n\n"
+                f"TOPIC {topic['topic_id']} ({topic['article_count']} articles)\n\n"
+                f"Top {min(20, len(keywords))} keywords:\n{kw_section}\n\n"
+                f"Top {len(rep_articles)} representative articles:\n{art_section}\n\n"
+                f"Based on the keywords and articles above, provide:\n"
+                f"1. A short aspect phrase (2-5 words) that captures what this topic is about\n"
+                f"2. A 1-2 sentence description explaining what this topic covers in the "
+                f"context of Cyclone Ditwah coverage\n\n"
+                f'Respond with JSON in this exact format:\n'
+                f'{{"aspect": "short phrase here", "description": "1-2 sentence description here"}}'
+            )
+
+            try:
+                response = llm.generate(prompt, system_prompt=system_prompt, json_mode=True)
+                result = json.loads(response.content)
+                desc_json = json.dumps(result)
+
+                # Store in topics.description (cursor context manager auto-commits)
+                with db.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {schema}.topics SET description = %s WHERE id = %s",
+                        (desc_json, topic['id'])
+                    )
+                success_count += 1
+
+            except Exception as e:
+                # Fallback: use keywords as aspect
+                fallback = {
+                    "aspect": " ".join(keywords[:3]) if keywords else topic['name'],
+                    "description": f"Topic covering: {', '.join(keywords[:5])}"
+                }
+                with db.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {schema}.topics SET description = %s WHERE id = %s",
+                        (json.dumps(fallback), topic['id'])
+                    )
+                success_count += 1
+
+    # Clear cache so new descriptions are loaded
+    load_topics_with_keywords.clear()
+    load_topics.clear()
+
+    return success_count
+
+
+@st.cache_data(ttl=300)
 def load_topic_coverage_by_source(topic_name: str, version_id: str):
     """Load coverage statistics for a specific topic across all sources.
 
