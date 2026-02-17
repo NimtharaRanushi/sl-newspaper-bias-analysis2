@@ -53,7 +53,7 @@ def load_overview_stats(version_id=None):
             if version_id:
                 # Total topics for this version
                 cur.execute(
-                    f"SELECT COUNT(*) as count FROM {schema}.topics WHERE topic_id != -1 AND result_version_id = %s",
+                    f"SELECT COUNT(*) as count FROM {schema}.topics WHERE topic_id NOT IN (-1, -2) AND result_version_id = %s",
                     (version_id,)
                 )
                 total_topics = cur.fetchone()["count"]
@@ -109,7 +109,7 @@ def load_topics(version_id=None):
             cur.execute(f"""
                 SELECT topic_id, name, description, article_count
                 FROM {schema}.topics
-                WHERE topic_id != -1 AND result_version_id = %s
+                WHERE topic_id NOT IN (-1, -2) AND result_version_id = %s
                 ORDER BY article_count DESC
             """, (version_id,))
             return cur.fetchall()
@@ -219,7 +219,7 @@ def load_topic_sentiment(model_type: str, version_id=None):
                 JOIN {schema}.news_articles n ON sa.article_id = n.id
                 JOIN {schema}.article_analysis aa ON sa.article_id = aa.article_id
                 JOIN {schema}.topics t ON aa.primary_topic_id = t.id
-                WHERE sa.model_type = %s AND t.topic_id != -1
+                WHERE sa.model_type = %s AND t.topic_id NOT IN (-1, -2)
                   AND n.is_ditwah_cyclone = 1
                   AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
             """
@@ -262,7 +262,7 @@ def load_topic_list(version_id=None):
                 cur.execute(f"""
                     SELECT name, description, article_count
                     FROM {schema}.topics
-                    WHERE topic_id != -1 AND result_version_id = %s
+                    WHERE topic_id NOT IN (-1, -2) AND result_version_id = %s
                     ORDER BY article_count DESC
                     LIMIT 50
                 """, (version_id,))
@@ -270,7 +270,7 @@ def load_topic_list(version_id=None):
                 cur.execute(f"""
                     SELECT name, description, article_count
                     FROM {schema}.topics
-                    WHERE topic_id != -1
+                    WHERE topic_id NOT IN (-1, -2)
                     ORDER BY article_count DESC
                     LIMIT 50
                 """)
@@ -406,7 +406,7 @@ def load_topic_by_source(version_id=None):
                 FROM {schema}.article_analysis aa
                 JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                 JOIN {schema}.news_articles n ON aa.article_id = n.id
-                WHERE t.topic_id != -1
+                WHERE t.topic_id NOT IN (-1, -2)
                   AND aa.result_version_id = %s
                   AND t.result_version_id = %s
                 GROUP BY t.name, n.source_id
@@ -431,7 +431,7 @@ def load_topics_with_keywords(version_id, limit=15):
             cur.execute(f"""
                 SELECT id, topic_id, name, description, keywords, article_count
                 FROM {schema}.topics
-                WHERE topic_id != -1 AND result_version_id = %s
+                WHERE topic_id NOT IN (-1, -2) AND result_version_id = %s
                 ORDER BY article_count DESC
                 LIMIT %s
             """, (version_id, limit))
@@ -596,6 +596,278 @@ def generate_topic_aspects(version_id, topics_with_keywords, force=False):
     return success_count
 
 
+def _analyze_outlet_specialization(bias_df: pd.DataFrame) -> str:
+    """Identify which outlets have most distinctive coverage patterns."""
+    # For each outlet, find topics where they're outliers (>2x or <0.5x average)
+    from dashboard.components.source_mapping import SOURCE_NAMES
+
+    outlets = [col for col in bias_df.columns if col not in
+               ['Aspect', 'Topic', 'Spread', 'Most', 'Least']]
+
+    specializations = []
+    for outlet in outlets:
+        # Find topics where this outlet is significantly different
+        outlier_topics = []
+        for idx, row in bias_df.iterrows():
+            avg = bias_df[outlets].loc[idx].mean()
+            if row[outlet] > avg * 2:
+                outlier_topics.append(f"{row['Aspect']} ({row[outlet]:.1f}% vs avg {avg:.1f}%)")
+
+        if outlier_topics:
+            specializations.append(f"  {outlet}: {', '.join(outlier_topics[:3])}")
+
+    return "\n".join(specializations) if specializations else "No strong specialization patterns"
+
+
+def _find_surprising_gaps(bias_df: pd.DataFrame) -> str:
+    """Find topics with largest coverage disparities."""
+    top_gaps = bias_df.nlargest(3, 'Spread')
+    gaps = []
+    for _, row in top_gaps.iterrows():
+        gaps.append(
+            f"  {row['Aspect']}: {row['Most']} covers {row['Spread']:.1f}pp more than {row['Least']}"
+        )
+    return "\n".join(gaps)
+
+
+def generate_overall_bias_narrative(version_id: str, bias_data: pd.DataFrame) -> bool:
+    """Generate overall narrative about selection bias patterns and store in topics table.
+
+    Args:
+        version_id: Topic version ID
+        bias_data: DataFrame with columns: Aspect, [outlet names], Spread, Most, Least
+
+    Returns:
+        True if successful, False otherwise
+    """
+    from src.llm import get_llm
+    import json
+
+    llm = get_llm()
+
+    system_prompt = (
+        "You are a media bias analyst studying Sri Lankan newspaper coverage of "
+        "Cyclone Ditwah. You are analyzing selection bias patterns - which topics "
+        "each outlet chose to cover (or ignore) - to understand editorial priorities."
+    )
+
+    # Prepare analysis context
+    top_spread = bias_data.nlargest(5, 'Spread')[['Aspect', 'Spread', 'Most', 'Least']]
+    outlet_specialization = _analyze_outlet_specialization(bias_data)
+    surprising_gaps = _find_surprising_gaps(bias_data)
+
+    prompt = (
+        f"Analyze the selection bias patterns from this coverage data:\n\n"
+        f"TOP 5 TOPICS BY COVERAGE VARIANCE:\n{top_spread.to_string()}\n\n"
+        f"OUTLET SPECIALIZATION:\n{outlet_specialization}\n\n"
+        f"SURPRISING COVERAGE GAPS:\n{surprising_gaps}\n\n"
+        f"Write a brief analysis (3-4 sentences) highlighting:\n"
+        f"1. Which outlets show the most distinct editorial focus (specialization)\n"
+        f"2. Most surprising coverage gaps (topics heavily covered by some but ignored by others)\n"
+        f"3. What this reveals about editorial priorities\n\n"
+        f"Be specific with numbers and outlet names. Keep it concise and insightful."
+    )
+
+    try:
+        response = llm.generate(prompt, system_prompt=system_prompt)
+        narrative = response.content.strip()
+
+        # Store in topics table with topic_id = -2 (reserved for bias analysis metadata)
+        with get_db() as db:
+            schema = db.config["schema"]
+            with db.cursor() as cur:
+                # Check if already exists
+                cur.execute(
+                    f"SELECT id FROM {schema}.topics "
+                    f"WHERE topic_id = -2 AND result_version_id = %s",
+                    (version_id,)
+                )
+                existing = cur.fetchone()
+
+                desc_json = json.dumps({"narrative": narrative})
+
+                if existing:
+                    # Update existing
+                    cur.execute(
+                        f"UPDATE {schema}.topics SET description = %s WHERE id = %s",
+                        (desc_json, existing['id'])
+                    )
+                else:
+                    # Insert new
+                    cur.execute(
+                        f"""INSERT INTO {schema}.topics
+                            (topic_id, result_version_id, name, description, article_count)
+                            VALUES (-2, %s, %s, %s, %s)""",
+                        (version_id, "Overall Bias Analysis", desc_json, len(bias_data))
+                    )
+
+        return True
+
+    except Exception as e:
+        print(f"Failed to generate overall narrative: {e}")
+        return False
+
+
+def generate_topic_bias_insights(version_id: str, bias_data: pd.DataFrame, force: bool = False) -> int:
+    """Generate bias insights for each topic and store in topics.description.
+
+    Args:
+        version_id: Topic version ID
+        bias_data: Bias DataFrame with coverage percentages
+        force: Regenerate even if insights already exist
+
+    Returns:
+        Number of topics successfully analyzed
+    """
+    import json
+    from src.llm import get_llm
+    from dashboard.components.source_mapping import SOURCE_NAMES
+
+    llm = get_llm()
+    success_count = 0
+
+    system_prompt = (
+        "You are analyzing selection bias in Sri Lankan newspaper coverage. "
+        "For each topic, explain why coverage varies across outlets, focusing on "
+        "outlet specialization and surprising coverage gaps."
+    )
+
+    with get_db() as db:
+        schema = db.config["schema"]
+
+        for _, row in bias_data.iterrows():
+            topic_name = row['Topic']
+
+            # Load current description
+            with db.cursor() as cur:
+                cur.execute(
+                    f"SELECT id, description FROM {schema}.topics "
+                    f"WHERE name = %s AND result_version_id = %s",
+                    (topic_name, version_id)
+                )
+                result = cur.fetchone()
+                if not result:
+                    continue
+
+                topic_id, desc_json = result['id'], result['description']
+
+            # Skip if already has bias_insight (unless force)
+            if not force and desc_json:
+                try:
+                    existing = json.loads(desc_json)
+                    if existing.get('bias_insight'):
+                        success_count += 1
+                        continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Build context for this topic
+            outlets = [col for col in bias_data.columns if col not in
+                      ['Aspect', 'Topic', 'Spread', 'Most', 'Least']]
+            coverage = {outlet: row[outlet] for outlet in outlets}
+
+            prompt = (
+                f"Topic: {row['Aspect']}\n"
+                f"Coverage by outlet:\n"
+                + "\n".join(f"  {o}: {coverage[o]:.1f}%" for o in outlets) +
+                f"\n\nSpread: {row['Spread']:.1f} percentage points\n"
+                f"Most coverage: {row['Most']}\n"
+                f"Least coverage: {row['Least']}\n\n"
+                f"Write a concise 1-2 sentence insight explaining:\n"
+                f"- Which outlet(s) specialize in this topic (if any)\n"
+                f"- Most surprising coverage gap (if significant)\n"
+                f"Only mention notable patterns (spread >5pp). If spread is small, just say 'Balanced coverage across outlets.'"
+            )
+
+            try:
+                response = llm.generate(prompt, system_prompt=system_prompt)
+                insight = response.content.strip()
+
+                # Merge with existing description JSON
+                desc_data = json.loads(desc_json) if desc_json else {}
+                desc_data['bias_insight'] = insight
+
+                with db.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {schema}.topics SET description = %s WHERE id = %s",
+                        (json.dumps(desc_data), topic_id)
+                    )
+                success_count += 1
+
+            except Exception as e:
+                # Fallback: skip this topic
+                print(f"Failed to generate insight for topic {topic_name}: {e}")
+                continue
+
+    # Clear caches
+    load_topics_with_keywords.clear()
+    load_topics.clear()
+    load_bias_narrative.clear()  # Clear narrative cache too
+
+    return success_count
+
+
+def generate_selection_bias_analysis(version_id: str, bias_df: pd.DataFrame, force: bool = False) -> dict:
+    """Generate both overall narrative and per-topic insights.
+
+    Args:
+        version_id: Topic version ID
+        bias_df: Bias analysis DataFrame
+        force: Regenerate even if analysis already exists
+
+    Returns:
+        Dict with keys: overall_success (bool), topic_count (int)
+    """
+    results = {'overall_success': False, 'topic_count': 0}
+
+    # Generate overall narrative (stores in topics table with topic_id = -2)
+    results['overall_success'] = generate_overall_bias_narrative(version_id, bias_df)
+
+    # Generate per-topic insights
+    try:
+        count = generate_topic_bias_insights(version_id, bias_df, force)
+        results['topic_count'] = count
+    except Exception as e:
+        print(f"Failed to generate topic insights: {e}")
+
+    # Clear narrative cache (already cleared in individual functions, but ensure it's done)
+    load_bias_narrative.clear()
+
+    return results
+
+
+@st.cache_data(ttl=300)
+def load_bias_narrative(version_id: str):
+    """Load overall bias narrative for a version.
+
+    Args:
+        version_id: Topic version ID
+
+    Returns:
+        Narrative text or None if not generated
+    """
+    import json
+
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(
+                f"SELECT description FROM {schema}.topics "
+                f"WHERE topic_id = -2 AND result_version_id = %s",
+                (version_id,)
+            )
+            result = cur.fetchone()
+
+            if result and result['description']:
+                try:
+                    desc = json.loads(result['description'])
+                    return desc.get('narrative')
+                except (json.JSONDecodeError, TypeError):
+                    return None
+
+            return None
+
+
 @st.cache_data(ttl=300)
 def load_topic_coverage_by_source(topic_name: str, version_id: str):
     """Load coverage statistics for a specific topic across all sources.
@@ -617,7 +889,7 @@ def load_topic_coverage_by_source(topic_name: str, version_id: str):
                     JOIN {schema}.topics t ON aa.primary_topic_id = t.id
                     JOIN {schema}.news_articles n ON aa.article_id = n.id
                     WHERE t.name = %s
-                      AND t.topic_id != -1
+                      AND t.topic_id NOT IN (-1, -2)
                       AND aa.result_version_id = %s
                       AND t.result_version_id = %s
                     GROUP BY n.source_id

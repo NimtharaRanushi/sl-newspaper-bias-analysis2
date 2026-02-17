@@ -11,7 +11,8 @@ import plotly.express as px
 
 from data.loaders import (
     load_topics, load_topic_by_source, load_bertopic_model,
-    load_topics_with_keywords, load_outlet_totals, generate_topic_aspects
+    load_topics_with_keywords, load_outlet_totals, generate_topic_aspects,
+    generate_selection_bias_analysis, load_bias_narrative
 )
 from components.source_mapping import SOURCE_NAMES, SOURCE_COLORS
 from components.version_selector import render_version_selector, render_create_version_button
@@ -57,7 +58,7 @@ if topics_with_kw:
         except (ValueError, TypeError):
             pass
 
-    btn_label = "Regenerate Aspect Labels" if has_aspects else "Generate Aspect Labels"
+    btn_label = "Regenerate Topic Labels" if has_aspects else "Generate Topic Labels"
     btn_help = "Uses the configured LLM to generate short aspect phrases for each topic (using random article samples)"
 
     if st.button(btn_label, help=btn_help):
@@ -128,7 +129,8 @@ if topics_with_kw and topic_source_data and outlet_totals:
     top_names = [t['name'] for t in topics_with_kw]
     ts_bias_filtered = ts_df_bias[ts_df_bias['topic'].isin(top_names)]
 
-    all_outlets = list(SOURCE_NAMES.keys())
+    # Only include outlets that have articles in the dataset
+    all_outlets = [sid for sid in SOURCE_NAMES.keys() if sid in outlet_totals]
 
     bias_rows = []
     for t in topics_with_kw:
@@ -175,6 +177,70 @@ if topics_with_kw and topic_source_data and outlet_totals:
             **{SOURCE_NAMES[s]: st.column_config.NumberColumn(format="%.1f%%") for s in all_outlets}
         }
     )
+
+    # Selection bias narrative generation
+    st.markdown("")  # Add spacing
+
+    # Check if narrative already exists
+    narrative = load_bias_narrative(version_id)
+    has_narrative = narrative is not None
+
+    # Check if any topics have bias insights
+    has_insights = False
+    for t in topics_with_kw:
+        try:
+            if t.get('description'):
+                desc_data = _json.loads(t['description'])
+                if desc_data.get('bias_insight'):
+                    has_insights = True
+                    break
+        except (ValueError, TypeError):
+            pass
+
+    btn_label = "Regenerate Description" if (has_narrative or has_insights) else "Generate Description"
+    btn_help = "Uses LLM to analyze selection bias patterns (outlet specialization and coverage gaps)"
+
+    if st.button(btn_label, help=btn_help, key="generate_bias_analysis"):
+        with st.spinner("Analyzing selection bias patterns... This may take 1-2 minutes."):
+            results = generate_selection_bias_analysis(
+                version_id,
+                bias_df,
+                force=(has_narrative or has_insights)
+            )
+
+            msg_parts = []
+            if results['overall_success']:
+                msg_parts.append("overall narrative")
+            if results['topic_count'] > 0:
+                msg_parts.append(f"{results['topic_count']} topic insights")
+
+            if msg_parts:
+                st.success(f"Generated {' and '.join(msg_parts)}.")
+                st.rerun()
+            else:
+                st.error("Failed to generate bias analysis. Check logs.")
+
+    # Display overall narrative if exists
+    if narrative:
+        st.markdown("### 🔍 Selection Bias Analysis")
+        st.info(narrative)
+
+        # Optionally show per-topic insights
+        with st.expander("Per-Topic Bias Insights"):
+            for t in topics_with_kw:
+                try:
+                    if t.get('description'):
+                        desc_data = _json.loads(t['description'])
+                        insight = desc_data.get('bias_insight')
+                        aspect = desc_data.get('aspect', t['name'])
+
+                        if insight:
+                            st.markdown(f"**{aspect}:** {insight}")
+                except (ValueError, TypeError):
+                    pass
+    elif not has_insights:
+        st.info("💡 Generate bias analysis to see LLM-powered insights about coverage patterns.")
+
 else:
     st.info("Run topic discovery to see selection bias analysis.")
 
