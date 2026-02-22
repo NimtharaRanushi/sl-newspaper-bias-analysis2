@@ -24,13 +24,17 @@ ALLOWED_COLUMNS = {
 ALLOWED_OPS = {"=", "!=", ">", ">=", "<", "<=", "ILIKE"}
 
 
-def ditwah_filters() -> List[ArticleFilter]:
-    """Standard filters for Ditwah cyclone analysis."""
+def date_range_filters() -> List[ArticleFilter]:
+    """Standard date range filters for the study period."""
     return [
-        ArticleFilter("is_ditwah_cyclone", "=", 1),
         ArticleFilter("date_posted", ">=", "2025-11-22"),
         ArticleFilter("date_posted", "<=", "2025-12-31"),
     ]
+
+
+def ditwah_filters() -> List[ArticleFilter]:
+    """Standard filters for Ditwah cyclone analysis."""
+    return [ArticleFilter("is_ditwah_cyclone", "=", 1)] + date_range_filters()
 
 
 class ArticleMixin:
@@ -166,6 +170,123 @@ class ArticleMixin:
                 WHERE id = %s
             """, (article_id,))
             return cur.fetchone()
+
+    def get_article_counts_by_source(
+        self, filters: List[ArticleFilter] = None
+    ) -> List[Dict]:
+        """Get article counts grouped by source.
+
+        Args:
+            filters: Optional list of ArticleFilter conditions
+
+        Returns:
+            List of dicts with source_id and count
+        """
+        schema = self.config["schema"]
+        base_conditions = []
+        params = []
+
+        filter_clauses, filter_params = self._build_filters(filters)
+        base_conditions.extend(filter_clauses)
+        params.extend(filter_params)
+
+        where = (" WHERE " + " AND ".join(base_conditions)) if base_conditions else ""
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT source_id, COUNT(*) as count
+                FROM {schema}.news_articles
+                {where}
+                GROUP BY source_id
+                ORDER BY count DESC
+            """, params)
+            return cur.fetchall()
+
+    def get_article_date_range(
+        self, filters: List[ArticleFilter] = None
+    ) -> Dict:
+        """Get min and max article dates.
+
+        Args:
+            filters: Optional list of ArticleFilter conditions
+
+        Returns:
+            Dict with min_date and max_date
+        """
+        schema = self.config["schema"]
+        base_conditions = []
+        params = []
+
+        filter_clauses, filter_params = self._build_filters(filters)
+        base_conditions.extend(filter_clauses)
+        params.extend(filter_params)
+
+        where = (" WHERE " + " AND ".join(base_conditions)) if base_conditions else ""
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT MIN(date_posted)::date as min_date,
+                       MAX(date_posted)::date as max_date
+                FROM {schema}.news_articles
+                {where}
+            """, params)
+            return cur.fetchone()
+
+    def get_article_counts_by_date(
+        self, filters: List[ArticleFilter] = None
+    ) -> List[Dict]:
+        """Get daily article counts grouped by date and source.
+
+        Args:
+            filters: Optional list of ArticleFilter conditions
+
+        Returns:
+            List of dicts with date, source_id, and count
+        """
+        schema = self.config["schema"]
+        base_conditions = ["date_posted IS NOT NULL"]
+        params = []
+
+        filter_clauses, filter_params = self._build_filters(filters)
+        base_conditions.extend(filter_clauses)
+        params.extend(filter_params)
+
+        where = " AND ".join(base_conditions)
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT date_posted::date as date, source_id, COUNT(*) as count
+                FROM {schema}.news_articles
+                WHERE {where}
+                GROUP BY date_posted::date, source_id
+                ORDER BY date
+            """, params)
+            return cur.fetchall()
+
+    def get_article_lengths(
+        self, filters: List[ArticleFilter] = None
+    ) -> List[Dict]:
+        """Get article content lengths by source.
+
+        Args:
+            filters: Optional list of ArticleFilter conditions
+
+        Returns:
+            List of dicts with source_id and article_length
+        """
+        schema = self.config["schema"]
+        base_conditions = ["content IS NOT NULL"]
+        params = []
+
+        filter_clauses, filter_params = self._build_filters(filters)
+        base_conditions.extend(filter_clauses)
+        params.extend(filter_params)
+
+        where = " AND ".join(base_conditions)
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT source_id, LENGTH(content) as article_length
+                FROM {schema}.news_articles
+                WHERE {where}
+            """, params)
+            return cur.fetchall()
 
     def search_articles(
         self,
