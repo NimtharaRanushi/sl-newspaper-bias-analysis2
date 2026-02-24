@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 from uuid import UUID
 
 from src.db import get_db
+from src.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -53,51 +54,13 @@ def generate_individual_claim_for_article(llm, article: Dict, config: Dict) -> O
     Returns:
         Claim text string or None if generation fails
     """
-    prompt = f"""Read this Sri Lankan newspaper article about Cyclone Ditwah and extract the SPECIFIC POSITION or ASSERTION it is making.
-
-Article Title: {article['title']}
-Article Date: {article['date_posted']}
-Article Source: {article['source_id']}
-Article Content: {article['content'][:2500] if article['content'] else article['title']}
-
-Your task: Write ONE claim that captures exactly what THIS article is asserting about Cyclone Ditwah.
-
-The claim must:
-1. Reflect the SPECIFIC position this article takes — not a generic summary
-2. Be debatable — other newspapers might frame the same topic differently
-3. Name specific actors, institutions, or outcomes where the article supports it
-4. Be 1–2 sentences
-5. Be grounded in what the article actually says (do not invent details)
-
-Ask yourself: "What is this article trying to convince the reader of?" That answer is your claim.
-
-Categories to consider:
-- Government response: Was it timely, coordinated, adequate? Who was praised or criticised?
-- Humanitarian impact: How severe were casualties/displacement? Which communities were hit hardest?
-- International response: Which countries/organisations helped? Was aid sufficient and timely?
-- Infrastructure damage: Which sectors and districts were hardest hit? How severe?
-- Economic impact: Which livelihoods were devastated? Fishing, farming, tourism?
-- Relief operations: Was distribution effective? Were there shortfalls or coordination failures?
-- Evacuation: Were people moved safely? Were shelters adequate?
-- Early warnings: Did warnings reach people in time? Were meteorological alerts accurate?
-- Recovery: Are reconstruction plans underway? Is funding adequate?
-
-GOOD claim examples (specific, debatable, grounded):
-- "The Presidential Task Force's relief coordination was criticised for being too slow to reach isolated coastal villages"
-- "Cyclone Ditwah displaced over 50,000 people, overwhelming government shelter capacity in the Southern Province"
-- "India's rapid deployment of naval vessels and emergency supplies was the most significant foreign aid contribution"
-- "Fishing communities in Hambantota bore the brunt of livelihood losses, with thousands of boats destroyed"
-- "Early warnings gave residents less than 12 hours to evacuate, leaving many coastal families without adequate time to prepare"
-
-BAD claim examples (too generic, not debatable):
-- "Cyclone Ditwah caused damage in Sri Lanka"
-- "The government responded to the cyclone"
-- "There were casualties and infrastructure damage"
-
-Return ONLY a JSON object:
-{{"claim": "Your specific, debatable claim grounded in this article"}}
-
-Return ONLY the JSON, no other text."""
+    prompt = load_prompt(
+        "ditwah/claims_individual.md",
+        article_title=article['title'],
+        article_date=article['date_posted'],
+        article_source=article['source_id'],
+        article_content=article['content'][:2000] if article['content'] else article['title'],
+    )
 
     try:
         response = llm.generate(prompt=prompt, json_mode=True)
@@ -438,49 +401,20 @@ def generate_general_claim_from_cluster(
         "preparation_measures"
     ])
 
-    prompt = f"""You are writing ONE high-quality general claim that faithfully captures what a group of {len(claims_data)} newspaper articles about Cyclone Ditwah are collectively asserting.
-
-Newspapers represented: {', '.join(sources)}
-
-ALL {len(claims_data)} per-article claims in this cluster (every article's individual position):
-
-{all_claims_block}
-
-Article text excerpts for context (first 20 shown){extra}:
-
-{article_block}
-
-YOUR TASK:
-Read ALL {len(claims_data)} per-article claims above — they represent the full scope of this cluster.
-Write ONE concise, substantive general claim that:
-1. Precisely captures the DOMINANT SHARED ASSERTION across ALL these articles — what is the central thing they are all saying about Cyclone Ditwah?
-2. Is SPECIFIC — name the relevant actors, institutions, locations, or outcomes that the articles highlight
-3. Is DEBATABLE — different sources may agree or disagree with this framing
-4. Is FAITHFUL — grounded in what ALL the articles say, not just a few
-5. Is 1–2 sentences maximum
-6. Is NOT generic — avoid hollow phrases like "the government responded" or "there was damage"
-7. Covers the BREADTH of the cluster — does not cherry-pick one article's angle when most say something different
-
-Ask yourself: "If someone read ALL {len(claims_data)} of these articles, what is the ONE key point they would all agree is being made?" Write that as a clear, precise claim.
-
-Strong examples:
-- "Cyclone Ditwah's relief operations were hampered by poor inter-agency coordination, leaving displaced communities in the Southern Province without adequate food and shelter for days"
-- "The Sri Lankan fishing industry suffered catastrophic losses as Cyclone Ditwah destroyed thousands of boats and damaged harbour infrastructure across Hambantota and Matara districts"
-- "Despite advance meteorological warnings, evacuation orders reached many coastal communities too late to allow safe and orderly departure"
-- "India's swift deployment of naval and air assets made it the single largest foreign contributor to Cyclone Ditwah relief efforts"
-
-Weak examples to AVOID:
-- "Cyclone Ditwah caused significant damage" (too vague)
-- "The government responded to the cyclone" (not debatable, no detail)
-- "News articles reported on Cyclone Ditwah" (trivially true)
-
-CATEGORIES (choose the single most appropriate):
-{chr(10).join(f"- {cat}" for cat in categories)}
-
-Return ONLY a JSON object:
-{{"claim_text": "Your specific, substantive general claim here", "claim_category": "most_appropriate_category"}}
-
-Return ONLY the JSON, no other text."""
+    individual_claims = [row['claim_text'] for row in claims_data]
+    overflow_text = (
+        f'... and {len(individual_claims) - 10} more' if len(individual_claims) > 10 else ''
+    )
+    prompt = load_prompt(
+        "ditwah/claims_general.md",
+        claim_count=len(individual_claims),
+        sources_list=', '.join(sources),
+        claims_list='\n'.join(
+            f'{i+1}. {claim}' for i, claim in enumerate(individual_claims[:10])
+        ),
+        overflow_text=overflow_text,
+        categories_list=', '.join(categories),
+    )
 
     try:
         response = llm.generate(prompt=prompt, json_mode=True)
@@ -638,53 +572,13 @@ def generate_claims_from_articles(llm, articles: List[Dict], config: Dict) -> Li
         article_summaries.append(summary)
 
     # Create LLM prompt
-    prompt = f"""You are analyzing {len(articles_to_use)} news articles about Cyclone Ditwah in Sri Lanka.
-Identify EXACTLY {num_claims} specific, debatable claims made across the coverage.
-
-Articles:
-{json.dumps(article_summaries, indent=2)}
-
-REQUIREMENTS:
-1. Generate EXACTLY {num_claims} claims — no fewer, no more
-2. Each claim MUST name specific actors, organizations, locations, or actions where the articles support it
-3. Each claim must be DEBATABLE — different sources would frame it differently
-4. No duplicate or near-duplicate claims — each must cover a distinct aspect
-5. Spread claims evenly across all categories below
-
-CATEGORIES (distribute claims across all of these):
-- government_response: coordination speed, Task Force actions, specific measures, adequacy gaps
-- international_response: which countries/orgs helped, aid amounts, delivery timing
-- infrastructure_damage: which sectors hit, specific districts, severity and scope
-- casualties_and_displacement: scale, which communities, shelter and care quality
-- economic_impact: fishing, tourism, agriculture, small business losses
-- relief_operations: aid distribution, NGO coordination, logistics problems
-- weather_warnings: lead time, reach to affected communities, preparation adequacy
-- recovery: reconstruction plans, funding, long-term consequences
-
-SPECIFICITY RULES — this separates good claims from bad:
-  BAD:  "The government responded to Cyclone Ditwah"
-  GOOD: "Sri Lanka's Presidential Task Force faced criticism for slow coordination of relief efforts in the Southern Province"
-
-  BAD:  "International aid arrived"
-  GOOD: "India provided the largest single foreign aid contribution including helicopters and emergency supplies"
-
-  BAD:  "People were displaced and infrastructure was damaged"
-  GOOD: "Coastal fishing communities in Hambantota and Matara faced the most severe economic and displacement impact"
-
-INCLUDE BOTH SIDES — generate some claims where sources agree AND some where they disagree:
-  Example pair: "Early warnings gave communities adequate preparation time" vs
-                "Cyclone Ditwah warnings reached coastal communities too late to be fully effective"
-
-Return ONLY a JSON array with EXACTLY {num_claims} objects:
-[
-  {{
-    "claim_text": "Specific 1-2 sentence debatable claim",
-    "claim_category": "one of the eight categories above",
-    "confidence": 0.9
-  }}
-]
-
-Return ONLY the JSON array, no other text."""
+    prompt = load_prompt(
+        "ditwah/claims_batch.md",
+        article_count=len(articles),
+        num_claims=num_claims,
+        articles_json=json.dumps(article_summaries, indent=2),
+        categories_list=', '.join(categories),
+    )
 
     try:
         # Call LLM
@@ -1067,37 +961,11 @@ def analyze_claim_stance_to_df(
             })
 
         # Create LLM prompt
-        prompt = f"""Analyze whether each article agrees, disagrees, or remains neutral about this claim:
-
-Claim: "{claim_text}"
-
-Articles:
-{json.dumps(article_data, indent=2)}
-
-For each article, determine:
-1. Does it agree, disagree, or remain neutral about the claim?
-2. How confident are you? (0.0 to 1.0)
-3. What is your reasoning?
-4. What quotes support your assessment? (up to 2 quotes)
-
-Return a JSON array with this structure:
-[
-  {{
-    "article_id": "uuid",
-    "stance_score": 0.7,  // -1.0 (strongly disagree) to +1.0 (strongly agree), 0 = neutral
-    "stance_label": "agree",  // one of: strongly_agree, agree, neutral, disagree, strongly_disagree
-    "confidence": 0.9,
-    "reasoning": "Brief explanation of the stance",
-    "supporting_quotes": ["quote 1", "quote 2"]
-  }}
-]
-
-Guidelines:
-- stance_score: -1.0 to -0.6 = strongly_disagree, -0.6 to -0.2 = disagree, -0.2 to 0.2 = neutral, 0.2 to 0.6 = agree, 0.6 to 1.0 = strongly_agree
-- If the article doesn't mention the claim, mark as neutral with low confidence
-- Focus on what the article explicitly states, not implications
-
-Return ONLY the JSON array, no other text."""
+        prompt = load_prompt(
+            "ditwah/claims_stance.md",
+            claim_text=claim_text,
+            articles_json=json.dumps(article_data, indent=2),
+        )
 
         try:
             # Call LLM
@@ -1195,37 +1063,11 @@ def analyze_claim_stance(
             })
 
         # Create LLM prompt
-        prompt = f"""Analyze whether each article agrees, disagrees, or remains neutral about this claim:
-
-Claim: "{claim_text}"
-
-Articles:
-{json.dumps(article_data, indent=2)}
-
-For each article, determine:
-1. Does it agree, disagree, or remain neutral about the claim?
-2. How confident are you? (0.0 to 1.0)
-3. What is your reasoning?
-4. What quotes support your assessment? (up to 2 quotes)
-
-Return a JSON array with this structure:
-[
-  {{
-    "article_id": "uuid",
-    "stance_score": 0.7,  // -1.0 (strongly disagree) to +1.0 (strongly agree), 0 = neutral
-    "stance_label": "agree",  // one of: strongly_agree, agree, neutral, disagree, strongly_disagree
-    "confidence": 0.9,
-    "reasoning": "Brief explanation of the stance",
-    "supporting_quotes": ["quote 1", "quote 2"]
-  }}
-]
-
-Guidelines:
-- stance_score: -1.0 to -0.6 = strongly_disagree, -0.6 to -0.2 = disagree, -0.2 to 0.2 = neutral, 0.2 to 0.6 = agree, 0.6 to 1.0 = strongly_agree
-- If the article doesn't mention the claim, mark as neutral with low confidence
-- Focus on what the article explicitly states, not implications
-
-Return ONLY the JSON array, no other text."""
+        prompt = load_prompt(
+            "ditwah/claims_stance.md",
+            claim_text=claim_text,
+            articles_json=json.dumps(article_data, indent=2),
+        )
 
         try:
             # Call LLM
@@ -1618,37 +1460,11 @@ def generate_claims_pipeline(version_id: UUID, config: Dict) -> Dict[str, Any]:
                 })
 
             # Create LLM prompt
-            prompt = f"""Analyze whether each article agrees, disagrees, or remains neutral about this claim:
-
-Claim: "{claim_text}"
-
-Articles:
-{json.dumps(article_data, indent=2)}
-
-For each article, determine:
-1. Does it agree, disagree, or remain neutral about the claim?
-2. How confident are you? (0.0 to 1.0)
-3. What is your reasoning?
-4. What quotes support your assessment? (up to 2 quotes)
-
-Return a JSON array with this structure:
-[
-  {{
-    "article_id": "uuid",
-    "stance_score": 0.7,  // -1.0 (strongly disagree) to +1.0 (strongly agree), 0 = neutral
-    "stance_label": "agree",  // one of: strongly_agree, agree, neutral, disagree, strongly_disagree
-    "confidence": 0.9,
-    "reasoning": "Brief explanation of the stance",
-    "supporting_quotes": ["quote 1", "quote 2"]
-  }}
-]
-
-Guidelines:
-- stance_score: -1.0 to -0.6 = strongly_disagree, -0.6 to -0.2 = disagree, -0.2 to 0.2 = neutral, 0.2 to 0.6 = agree, 0.6 to 1.0 = strongly_agree
-- If the article doesn't mention the claim, mark as neutral with low confidence
-- Focus on what the article explicitly states, not implications
-
-Return ONLY the JSON array, no other text."""
+            prompt = load_prompt(
+                "ditwah/claims_stance.md",
+                claim_text=claim_text,
+                articles_json=json.dumps(article_data, indent=2),
+            )
 
             try:
                 # Call LLM

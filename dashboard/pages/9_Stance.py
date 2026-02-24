@@ -39,17 +39,51 @@ def load_ditwah_claims(version_id: str, keyword: Optional[str] = None):
             if keyword:
                 keyword_pattern = f"%{keyword.lower()}%"
                 cur.execute(f"""
-                    SELECT * FROM {schema}.ditwah_claims
-                    WHERE result_version_id = %s
-                      AND LOWER(claim_text) LIKE %s
-                    ORDER BY claim_order, article_count DESC
+                    SELECT
+                        dc.id,
+                        dc.result_version_id,
+                        dc.claim_text,
+                        dc.claim_category as category,
+                        dc.claim_order,
+                        dc.article_count,
+                        dc.individual_claims_count,
+                        dc.representative_article_id,
+                        dc.llm_provider,
+                        dc.llm_model,
+                        dc.created_at,
+                        COUNT(DISTINCT cs.source_id) as source_count
+                    FROM {schema}.ditwah_claims dc
+                    LEFT JOIN {schema}.claim_stance cs ON cs.claim_id = dc.id
+                    WHERE dc.result_version_id = %s
+                      AND LOWER(dc.claim_text) LIKE %s
+                    GROUP BY dc.id, dc.result_version_id, dc.claim_text, dc.claim_category,
+                             dc.claim_order, dc.article_count, dc.individual_claims_count,
+                             dc.representative_article_id, dc.llm_provider, dc.llm_model, dc.created_at
+                    ORDER BY dc.claim_order, dc.article_count DESC
                     LIMIT 50
                 """, (version_id, keyword_pattern))
             else:
                 cur.execute(f"""
-                    SELECT * FROM {schema}.ditwah_claims
-                    WHERE result_version_id = %s
-                    ORDER BY claim_order, article_count DESC
+                    SELECT
+                        dc.id,
+                        dc.result_version_id,
+                        dc.claim_text,
+                        dc.claim_category as category,
+                        dc.claim_order,
+                        dc.article_count,
+                        dc.individual_claims_count,
+                        dc.representative_article_id,
+                        dc.llm_provider,
+                        dc.llm_model,
+                        dc.created_at,
+                        COUNT(DISTINCT cs.source_id) as source_count
+                    FROM {schema}.ditwah_claims dc
+                    LEFT JOIN {schema}.claim_stance cs ON cs.claim_id = dc.id
+                    WHERE dc.result_version_id = %s
+                    GROUP BY dc.id, dc.result_version_id, dc.claim_text, dc.claim_category,
+                             dc.claim_order, dc.article_count, dc.individual_claims_count,
+                             dc.representative_article_id, dc.llm_provider, dc.llm_model, dc.created_at
+                    ORDER BY dc.claim_order, dc.article_count DESC
                 """, (version_id,))
             return cur.fetchall()
 
@@ -197,25 +231,35 @@ def load_stance_polarization_matrix(version_id: str, category_filter: Optional[s
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
-            category_clause = "AND dc.category = %s" if category_filter else ""
+            category_clause = "AND dc.claim_category = %s" if category_filter else ""
             params = [version_id, category_filter] if category_filter else [version_id]
 
             cur.execute(f"""
+                WITH claim_controversy AS (
+                    SELECT
+                        cs_all.claim_id,
+                        STDDEV(cs_all.stance_score) as controversy_index
+                    FROM {schema}.claim_stance cs_all
+                    JOIN {schema}.ditwah_claims dc_all ON cs_all.claim_id = dc_all.id
+                    WHERE dc_all.result_version_id = %s {category_clause}
+                    GROUP BY cs_all.claim_id
+                )
                 SELECT
                     dc.id as claim_id,
                     dc.claim_text,
-                    dc.category,
+                    dc.claim_category as category,
                     cs.source_id,
                     AVG(cs.stance_score) as avg_stance,
                     AVG(cs.confidence) as avg_confidence,
-                    STDDEV(cs.stance_score) OVER (PARTITION BY dc.id) as controversy_index,
+                    cc.controversy_index,
                     COUNT(cs.id) as article_count
                 FROM {schema}.claim_stance cs
                 JOIN {schema}.ditwah_claims dc ON cs.claim_id = dc.id
+                JOIN claim_controversy cc ON cc.claim_id = dc.id
                 WHERE dc.result_version_id = %s {category_clause}
-                GROUP BY dc.id, dc.claim_text, dc.category, cs.source_id
-                ORDER BY controversy_index DESC, dc.claim_text, cs.source_id
-            """, params)
+                GROUP BY dc.id, dc.claim_text, dc.claim_category, cs.source_id, cc.controversy_index
+                ORDER BY cc.controversy_index DESC, dc.claim_text, cs.source_id
+            """, params + params)
 
             rows = cur.fetchall()
             return pd.DataFrame(rows)
@@ -268,7 +312,7 @@ def load_confidence_weighted_stances(version_id: str) -> pd.DataFrame:
                 SELECT
                     dc.id as claim_id,
                     dc.claim_text,
-                    dc.category,
+                    dc.claim_category as category,
                     AVG(cs.stance_score) as avg_stance,
                     STDDEV(cs.stance_score) as stddev_stance,
                     AVG(cs.confidence) as avg_confidence,
@@ -277,7 +321,7 @@ def load_confidence_weighted_stances(version_id: str) -> pd.DataFrame:
                 FROM {schema}.claim_stance cs
                 JOIN {schema}.ditwah_claims dc ON cs.claim_id = dc.id
                 WHERE dc.result_version_id = %s
-                GROUP BY dc.id, dc.claim_text, dc.category
+                GROUP BY dc.id, dc.claim_text, dc.claim_category
                 HAVING COUNT(DISTINCT cs.article_id) >= 2
                 ORDER BY stddev_stance DESC
             """, (version_id,))
@@ -471,7 +515,7 @@ def render_polarization_dashboard(version_id: str):
     for idx, row in controversy_df.iterrows():
         col1, col2 = st.columns([4, 1])
         with col1:
-            st.markdown(f"**{row['claim_text'][:100]}...**")
+            st.markdown(f"**{row['claim_text']}**")
             st.caption(f"Category: {row['category']}")
         with col2:
             st.metric("Controversy", f"{row['controversy_index']:.2f}")
@@ -877,7 +921,7 @@ render_polarization_dashboard(version_id)
 st.divider()
 
 # SECTION 3: Source Alignment Analysis
-st.subheader("🤝 Source Alignment Matrix")
+st.subheader("Source Alignment Matrix")
 st.markdown("See which news sources tend to agree or disagree with each other")
 render_source_alignment(version_id)
 

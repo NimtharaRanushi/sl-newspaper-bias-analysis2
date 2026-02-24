@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS media_bias.result_versions (
     configuration JSONB NOT NULL,
     analysis_type VARCHAR(50) NOT NULL DEFAULT 'combined',
     is_complete BOOLEAN DEFAULT false,
-    pipeline_status JSONB DEFAULT '{"embeddings": false, "topics": false, "clustering": false, "word_frequency": false, "ner": false, "summarization": false, "ditwah": false, "ditwah_claims": false}'::jsonb,
+    pipeline_status JSONB DEFAULT '{"embeddings": false, "topics": false, "clustering": false, "word_frequency": false, "ner": false, "summarization": false, "ditwah": false, "ditwah_claims": false, "entity_stance": false}'::jsonb,
     model_data BYTEA,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
@@ -40,15 +40,14 @@ CREATE TABLE IF NOT EXISTS media_bias.topics (
     UNIQUE(topic_id, result_version_id)
 );
 
--- Article embeddings
+-- Article embeddings (shared across versions, keyed by model)
 CREATE TABLE IF NOT EXISTS media_bias.embeddings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
-    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
     embedding VECTOR,
-    embedding_model VARCHAR(100),
+    embedding_model VARCHAR(100) NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(article_id, result_version_id)
+    UNIQUE(article_id, embedding_model)
 );
 
 -- Article-level analysis results
@@ -58,13 +57,6 @@ CREATE TABLE IF NOT EXISTS media_bias.article_analysis (
     result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
     primary_topic_id INTEGER REFERENCES media_bias.topics(id),
     topic_confidence FLOAT,
-    article_type VARCHAR(50),
-    article_type_confidence FLOAT,
-    overall_tone FLOAT,
-    headline_tone FLOAT,
-    tone_reasoning TEXT,
-    llm_provider VARCHAR(50),
-    llm_model VARCHAR(100),
     processed_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(article_id, result_version_id)
 );
@@ -139,7 +131,7 @@ CREATE TABLE IF NOT EXISTS media_bias.entity_statistics (
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_embeddings_article ON media_bias.embeddings(article_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_version ON media_bias.embeddings(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON media_bias.embeddings(embedding_model);
 CREATE INDEX IF NOT EXISTS idx_topics_version ON media_bias.topics(result_version_id);
 CREATE INDEX IF NOT EXISTS idx_article_analysis_article ON media_bias.article_analysis(article_id);
 CREATE INDEX IF NOT EXISTS idx_article_analysis_version ON media_bias.article_analysis(result_version_id);
@@ -256,6 +248,29 @@ CREATE TABLE IF NOT EXISTS media_bias.article_summaries (
 CREATE INDEX IF NOT EXISTS idx_article_summaries_article ON media_bias.article_summaries(article_id);
 CREATE INDEX IF NOT EXISTS idx_article_summaries_version ON media_bias.article_summaries(result_version_id);
 CREATE INDEX IF NOT EXISTS idx_article_summaries_method ON media_bias.article_summaries(result_version_id, method);
+
+-- Multi-document summaries for topic/cluster groups
+CREATE TABLE IF NOT EXISTS media_bias.multi_doc_summaries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    group_type VARCHAR(20) NOT NULL,  -- 'topic' | 'cluster'
+    group_id TEXT NOT NULL,  -- references topics.id (integer) or event_clusters.id (UUID)
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,  -- multi-doc summarization version
+    source_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,  -- topic or cluster version
+    summary_text TEXT NOT NULL,
+    method VARCHAR(50) NOT NULL,  -- 'openai' | 'gemini' (from version config)
+    llm_model VARCHAR(100) NOT NULL,  -- e.g., 'gpt-4o', 'gemini-2.0-flash'
+    article_count INTEGER NOT NULL,  -- number of articles summarized
+    source_count INTEGER NOT NULL,  -- number of distinct sources
+    word_count INTEGER,
+    processing_time_ms INTEGER,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(group_type, group_id, result_version_id, source_version_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_multi_doc_summaries_group ON media_bias.multi_doc_summaries(group_type, group_id);
+CREATE INDEX IF NOT EXISTS idx_multi_doc_summaries_version ON media_bias.multi_doc_summaries(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_multi_doc_summaries_source_version ON media_bias.multi_doc_summaries(source_version_id);
+CREATE INDEX IF NOT EXISTS idx_multi_doc_summaries_method ON media_bias.multi_doc_summaries(method);
 
 -- Ditwah Hurricane Hypothesis Analysis
 -- Hypotheses for Ditwah analysis
@@ -433,3 +448,27 @@ ORDER BY gc.claim_order, ac.created_at;
 
 COMMENT ON VIEW media_bias.ditwah_claims_hierarchy IS
   'Shows the mapping from individual article claims to general claims for analysis';
+
+-- Entity Stance Detection (NLI-based stance toward named entities)
+CREATE TABLE IF NOT EXISTS media_bias.entity_stance (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    ner_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id),
+    chunk_index INTEGER NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    entity_text VARCHAR(500) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    stance_score FLOAT NOT NULL,        -- -1.0 to +1.0
+    stance_label VARCHAR(50) NOT NULL,  -- strongly_negative, negative, positive, strongly_positive
+    confidence FLOAT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(article_id, result_version_id, chunk_index, entity_text)
+);
+
+-- Indexes for entity stance
+CREATE INDEX IF NOT EXISTS idx_entity_stance_version ON media_bias.entity_stance(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_entity_stance_article ON media_bias.entity_stance(article_id);
+CREATE INDEX IF NOT EXISTS idx_entity_stance_entity_text ON media_bias.entity_stance(entity_text);
+CREATE INDEX IF NOT EXISTS idx_entity_stance_entity_type ON media_bias.entity_stance(entity_type);

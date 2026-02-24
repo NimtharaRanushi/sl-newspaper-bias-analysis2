@@ -13,7 +13,8 @@ from src.versions import (
     get_default_word_frequency_config,
     get_default_ner_config,
     get_default_summarization_config,
-    get_default_ditwah_claims_config
+    get_default_ditwah_claims_config,
+    get_default_entity_stance_config
 )
 
 
@@ -75,12 +76,12 @@ def render_version_selector(analysis_type):
             status_items.append(f"{'✓' if status.get('summarization') else '○'} Summarization")
         elif analysis_type == 'ditwah_claims':
             status_items.append(f"{'✓' if status.get('ditwah_claims') else '○'} Ditwah Claims")
-        else:
-            status_items.append(f"{'✓' if status.get('embeddings') else '○'} Embeddings")
-            if analysis_type == 'topics':
-                status_items.append(f"{'✓' if status.get('topics') else '○'} Topics")
-            else:
-                status_items.append(f"{'✓' if status.get('clustering') else '○'} Clustering")
+        elif analysis_type == 'entity_stance':
+            status_items.append(f"{'✓' if status.get('entity_stance') else '○'} Entity Stance")
+        elif analysis_type == 'topics':
+            status_items.append(f"{'✓' if status.get('topics') else '○'} Topics")
+        elif analysis_type == 'clustering':
+            status_items.append(f"{'✓' if status.get('clustering') else '○'} Clustering")
 
         st.caption("Pipeline: " + " • ".join(status_items))
 
@@ -159,13 +160,22 @@ def render_create_version_dialog(analysis_type):
             st.markdown("**Step 1: Generate summaries**")
             st.code(f"python3 scripts/summarization/01_generate_summaries.py --version-id {version_id}", language="bash")
 
-        else:
-            st.markdown("**Step 1: Generate embeddings**")
-            st.code(f"python3 scripts/{analysis_type}/01_generate_embeddings.py --version-id {version_id}", language="bash")
+        elif analysis_type == 'topics':
+            st.markdown("**Run topic discovery:**")
+            st.code(f"python3 scripts/topics/02_discover_topics.py --version-id {version_id}", language="bash")
+            st.info("Embeddings are auto-generated if needed, or run separately:\n"
+                    "`python3 scripts/embeddings/01_generate_embeddings.py --model <model>`")
 
-            st.markdown(f"**Step 2: Run {'topic discovery' if analysis_type == 'topics' else 'event clustering'}**")
-            script_name = 'discover_topics' if analysis_type == 'topics' else 'cluster_events'
-            st.code(f"python3 scripts/{analysis_type}/02_{script_name}.py --version-id {version_id}", language="bash")
+        elif analysis_type == 'clustering':
+            st.markdown("**Run event clustering:**")
+            st.code(f"python3 scripts/clustering/02_cluster_events.py --version-id {version_id}", language="bash")
+            st.info("Embeddings are auto-generated if needed, or run separately:\n"
+                    "`python3 scripts/embeddings/01_generate_embeddings.py --model <model>`")
+
+        elif analysis_type == 'entity_stance':
+            st.markdown("**Step 1: Analyze entity stance**")
+            st.code(f"python3 scripts/entity_stance/01_analyze_entity_stance.py --version-id {version_id}", language="bash")
+            st.info("Requires a completed NER version. Set `ner_version_id` in the configuration.")
 
         st.markdown("---")
         st.info("💡 Close this dialog and the page will automatically refresh to show your new version")
@@ -198,6 +208,8 @@ def render_create_version_dialog(analysis_type):
         default_config = get_default_summarization_config()
     elif analysis_type == 'ditwah_claims':
         default_config = get_default_ditwah_claims_config()
+    elif analysis_type == 'entity_stance':
+        default_config = get_default_entity_stance_config()
     else:
         default_config = {}
 
