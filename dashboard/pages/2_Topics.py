@@ -109,7 +109,7 @@ if topic_source_data:
     ts_df['source_name'] = ts_df['source_id'].map(SOURCE_NAMES)
     
 
-st.subheader("Selection Bias Analysis")
+st.subheader("Coverage Analysis")
 st.markdown(
     "Which topics show the largest coverage differences between outlets? "
 )
@@ -178,7 +178,7 @@ if topics_with_kw and topic_source_data and outlet_totals:
         }
     )
 
-    # Selection bias narrative generation
+    # Coverage narrative generation
     st.markdown("")  # Add spacing
 
     # Check if narrative already exists
@@ -198,10 +198,10 @@ if topics_with_kw and topic_source_data and outlet_totals:
             pass
 
     btn_label = "Regenerate Description" if (has_narrative or has_insights) else "Generate Description"
-    btn_help = "Uses LLM to analyze selection bias patterns (outlet specialization and coverage gaps)"
+    btn_help = "Uses LLM to analyze coverage patterns (outlet specialization and coverage gaps)"
 
     if st.button(btn_label, help=btn_help, key="generate_bias_analysis"):
-        with st.spinner("Analyzing selection bias patterns... This may take 1-2 minutes."):
+        with st.spinner("Analyzing coverage patterns... This may take 1-2 minutes."):
             results = generate_selection_bias_analysis(
                 version_id,
                 bias_df,

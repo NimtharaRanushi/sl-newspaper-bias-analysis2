@@ -260,7 +260,7 @@ class ArticleMixin:
             """, params)
             return cur.fetchall()
 
-    def get_article_lengths(
+    def get_article_character_counts(
         self, filters: List[ArticleFilter] = None
     ) -> List[Dict]:
         """Get article content lengths by source.
@@ -283,6 +283,35 @@ class ArticleMixin:
         with self.cursor() as cur:
             cur.execute(f"""
                 SELECT source_id, LENGTH(content) as article_length
+                FROM {schema}.news_articles
+                WHERE {where}
+            """, params)
+            return cur.fetchall()
+
+    def get_article_word_counts(
+        self, filters: List[ArticleFilter] = None
+    ) -> List[Dict]:
+        """Get article word counts by source.
+
+        Args:
+            filters: Optional list of ArticleFilter conditions
+
+        Returns:
+            List of dicts with source_id and word_count
+        """
+        schema = self.config["schema"]
+        base_conditions = ["content IS NOT NULL"]
+        params = []
+
+        filter_clauses, filter_params = self._build_filters(filters)
+        base_conditions.extend(filter_clauses)
+        params.extend(filter_params)
+
+        where = " AND ".join(base_conditions)
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT source_id,
+                       array_length(regexp_split_to_array(content, '\s+'), 1) as word_count
                 FROM {schema}.news_articles
                 WHERE {where}
             """, params)

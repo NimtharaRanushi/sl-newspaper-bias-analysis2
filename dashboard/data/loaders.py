@@ -381,7 +381,7 @@ def load_topic_by_source(version_id=None):
 
 @st.cache_data(ttl=300)
 def load_topics_with_keywords(version_id, limit=15):
-    """Load top topics with keywords for selection bias analysis.
+    """Load top topics with keywords.
 
     Returns:
         List of dicts with keys: id, topic_id, name, description, keywords, article_count
@@ -573,7 +573,7 @@ def _find_surprising_gaps(bias_df: pd.DataFrame) -> str:
 
 
 def generate_overall_bias_narrative(version_id: str, bias_data: pd.DataFrame) -> bool:
-    """Generate overall narrative about selection bias patterns and store in topics table.
+    """Generate overall narrative about coverage patterns and store in topics table.
 
     Args:
         version_id: Topic version ID
@@ -893,17 +893,31 @@ def load_ditwah_timeline():
 
 
 @st.cache_data(ttl=300)
-def load_article_lengths():
-    """Load article lengths for distribution analysis."""
+def load_article_character_counts():
+    """Load article character counts for distribution analysis."""
     with get_db() as db:
-        return db.get_article_lengths(date_range_filters())
+        return db.get_article_character_counts(date_range_filters())
 
 
 @st.cache_data(ttl=300)
-def load_ditwah_article_lengths():
-    """Load article lengths for Ditwah articles."""
+def load_ditwah_article_character_counts():
+    """Load article character counts for Ditwah articles."""
     with get_db() as db:
-        return db.get_article_lengths(ditwah_filters())
+        return db.get_article_character_counts(ditwah_filters())
+
+
+@st.cache_data(ttl=300)
+def load_article_word_counts():
+    """Load article word counts for distribution analysis."""
+    with get_db() as db:
+        return db.get_article_word_counts(date_range_filters())
+
+
+@st.cache_data(ttl=300)
+def load_ditwah_article_word_counts():
+    """Load article word counts for Ditwah articles."""
+    with get_db() as db:
+        return db.get_article_word_counts(ditwah_filters())
 
 
 @st.cache_data(ttl=300)

@@ -14,8 +14,10 @@ from data.loaders import (
     load_overview_stats,
     load_coverage_timeline,
     load_ditwah_timeline,
-    load_article_lengths,
-    load_ditwah_article_lengths
+    load_article_character_counts,
+    load_ditwah_article_character_counts,
+    load_article_word_counts,
+    load_ditwah_article_word_counts
 )
 from components.source_mapping import SOURCE_NAMES, SOURCE_COLORS
 from components.styling import apply_page_style
@@ -188,14 +190,13 @@ else:
 
 st.divider()
 
-# Article Length Distribution Section
 st.header("Article Length Distribution")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("All Articles Length Distribution")
-    lengths_data = load_article_lengths()
+    st.subheader("All Articles Length Distribution by Character Count")
+    lengths_data = load_article_character_counts()
 
     if lengths_data:
         lengths_df = pd.DataFrame(lengths_data)
@@ -215,8 +216,8 @@ with col1:
         st.caption(f"**Median length:** {lengths_df['article_length'].median():.0f} characters")
 
 with col2:
-    st.subheader("Ditwah Articles Length Distribution")
-    ditwah_lengths = load_ditwah_article_lengths()
+    st.subheader("Ditwah Articles Length Distribution by Character Count")
+    ditwah_lengths = load_ditwah_article_character_counts()
 
     if ditwah_lengths:
         ditwah_lengths_df = pd.DataFrame(ditwah_lengths)
@@ -236,3 +237,47 @@ with col2:
         st.caption(f"**Median length:** {ditwah_lengths_df['article_length'].median():.0f} characters")
     else:
         st.info("No Ditwah cyclone articles available for length analysis.")
+
+col3, col4 = st.columns(2)
+
+with col3:
+    st.subheader("All Articles Length Distribution by Word Count")
+    word_counts_data = load_article_word_counts()
+
+    if word_counts_data:
+        word_counts_df = pd.DataFrame(word_counts_data)
+
+        fig = px.histogram(
+            word_counts_df,
+            x='word_count',
+            labels={'word_count': 'Article Length (words)'},
+            nbins=50,
+            color_discrete_sequence=['#636EFA']
+        )
+        fig.update_layout(height=400, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(f"**Mean length:** {word_counts_df['word_count'].mean():.0f} words")
+        st.caption(f"**Median length:** {word_counts_df['word_count'].median():.0f} words")
+
+with col4:
+    st.subheader("Ditwah Articles Length Distribution by Word Count")
+    ditwah_word_counts = load_ditwah_article_word_counts()
+
+    if ditwah_word_counts:
+        ditwah_word_counts_df = pd.DataFrame(ditwah_word_counts)
+
+        fig = px.histogram(
+            ditwah_word_counts_df,
+            x='word_count',
+            labels={'word_count': 'Article Length (words)'},
+            nbins=50,
+            color_discrete_sequence=['#EF553B']
+        )
+        fig.update_layout(height=400, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(f"**Mean length:** {ditwah_word_counts_df['word_count'].mean():.0f} words")
+        st.caption(f"**Median length:** {ditwah_word_counts_df['word_count'].median():.0f} words")
+    else:
+        st.info("No Ditwah cyclone articles available for word count analysis.")
