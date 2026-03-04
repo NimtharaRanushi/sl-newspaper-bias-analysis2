@@ -1,207 +1,131 @@
-"""Event clustering to group related articles."""
+"""Event clustering: store pairwise similarity edges for dynamic runtime clustering."""
 
-import random
 import numpy as np
-from typing import Dict
-import uuid
+from typing import Dict, List, Set
+import networkx as nx
 
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 
-from .db import get_db, load_config
+from .db import get_db, ditwah_filters
 
 
 def cluster_articles(
     result_version_id: str,
-    similarity_threshold: float = 0.8,
-    time_window_days: int = 7,
-    min_cluster_size: int = 2,
-    random_seed: int = 42,
+    storage_threshold: float = 0.5,
     embeddings_config: dict = None
 ) -> Dict:
     """
-    Cluster articles into events based on embedding similarity for a specific version.
+    Compute pairwise cosine similarities and store all edges above storage_threshold.
+
+    No cluster assignment happens here — clustering is computed at dashboard render time
+    using the stored edges, with user-controlled threshold and date-window sliders.
 
     Args:
         result_version_id: UUID of the result version
-        similarity_threshold: Minimum cosine similarity to cluster together
-        time_window_days: Only cluster articles within this time window
-        min_cluster_size: Minimum articles per cluster
-        random_seed: Random seed for reproducibility
-        embeddings_config: Embeddings configuration (contains model name)
+        storage_threshold: Minimum similarity to persist (default 0.5); the UI
+            slider will only allow values >= storage_threshold
+        embeddings_config: Embeddings configuration dict (contains model name)
 
     Returns:
-        Summary of clustering results
+        Summary dict with total_articles, total_edges, storage_threshold
     """
-    random.seed(random_seed)
-    np.random.seed(random_seed)
-
     embedding_model = (embeddings_config or {}).get("model", "all-mpnet-base-v2")
-    print(f"Loading articles with embeddings for model '{embedding_model}'...")
+    filters = ditwah_filters()
+    print(f"Loading Ditwah articles with embeddings for model '{embedding_model}'...")
     with get_db() as db:
-        data = db.get_all_embeddings(embedding_model=embedding_model)
+        data = db.get_all_embeddings(embedding_model=embedding_model, filters=filters)
 
     if len(data) == 0:
         print(f"No embeddings found for model '{embedding_model}'. Generating automatically...")
         from .embeddings import generate_embeddings
         generate_embeddings(embedding_model=embedding_model, embeddings_config=embeddings_config)
         with get_db() as db:
-            data = db.get_all_embeddings(embedding_model=embedding_model)
+            data = db.get_all_embeddings(embedding_model=embedding_model, filters=filters)
 
     print(f"Loaded {len(data)} articles")
 
     article_ids = [str(d['article_id']) for d in data]
     embeddings = np.array([d['embedding'] for d in data])
-    dates = [d['date_posted'] for d in data]
-    sources = [d['source_id'] for d in data]
-    titles = [d['title'] for d in data]
 
     print("Computing similarity matrix...")
-    # Compute cosine similarity (this can be memory intensive for large datasets)
-    # For 8k articles, this creates an 8k x 8k matrix (~500MB)
     similarity_matrix = cosine_similarity(embeddings)
 
-    print("Finding clusters...")
-    # Find clusters using a simple approach:
-    # 1. For each article, find all similar articles within time window
-    # 2. Merge overlapping groups
+    print(f"Extracting pairs with similarity >= {storage_threshold}...")
+    edges = []
+    n = len(article_ids)
+    for i in tqdm(range(n), desc="Extracting edges"):
+        for j in range(i + 1, n):
+            sim = float(similarity_matrix[i, j])
+            if sim >= storage_threshold:
+                id_a, id_b = article_ids[i], article_ids[j]
+                # Enforce id_a < id_b to satisfy the CHECK constraint
+                if id_a > id_b:
+                    id_a, id_b = id_b, id_a
+                edges.append((id_a, id_b, sim))
 
-    clusters = []
-    clustered = set()
+    print(f"Found {len(edges)} edges above threshold {storage_threshold}")
 
-    for i in tqdm(range(len(article_ids)), desc="Clustering"):
-        if i in clustered:
-            continue
-
-        # Find all similar articles
-        similar_indices = []
-        for j in range(len(article_ids)):
-            if i == j:
-                continue
-
-            # Check similarity threshold
-            if similarity_matrix[i, j] < similarity_threshold:
-                continue
-
-            # Check time window
-            if dates[i] and dates[j]:
-                time_diff = abs((dates[i] - dates[j]).days)
-                if time_diff > time_window_days:
-                    continue
-
-            similar_indices.append(j)
-
-        # Create cluster if we have enough similar articles
-        if len(similar_indices) >= min_cluster_size - 1:  # -1 because we include article i
-            cluster_indices = [i] + similar_indices
-
-            # Skip if all articles are already clustered
-            new_articles = [idx for idx in cluster_indices if idx not in clustered]
-            if len(new_articles) < min_cluster_size:
-                continue
-
-            # Mark as clustered
-            for idx in cluster_indices:
-                clustered.add(idx)
-
-            # Calculate cluster info
-            cluster_embeddings = embeddings[cluster_indices]
-            centroid = np.mean(cluster_embeddings, axis=0)
-
-            cluster_dates = [dates[idx] for idx in cluster_indices if dates[idx]]
-            cluster_sources = list(set([sources[idx] for idx in cluster_indices]))
-
-            # Find representative article (closest to centroid)
-            distances = [np.linalg.norm(embeddings[idx] - centroid) for idx in cluster_indices]
-            rep_idx = cluster_indices[np.argmin(distances)]
-
-            clusters.append({
-                "id": str(uuid.uuid4()),
-                "article_indices": cluster_indices,
-                "article_ids": [article_ids[idx] for idx in cluster_indices],
-                "representative_article_id": article_ids[rep_idx],
-                "representative_title": titles[rep_idx],
-                "centroid": centroid.tolist(),
-                "article_count": len(cluster_indices),
-                "sources": cluster_sources,
-                "sources_count": len(cluster_sources),
-                "date_start": min(cluster_dates) if cluster_dates else None,
-                "date_end": max(cluster_dates) if cluster_dates else None,
-            })
-
-    print(f"Found {len(clusters)} event clusters")
-
-    # Store clusters in database
-    print("Saving clusters to database...")
+    print("Storing edges to database...")
     with get_db() as db:
-        for cluster in tqdm(clusters, desc="Saving"):
-            db.store_event_clusters([{
-                "id": cluster["id"],
-                "name": cluster["representative_title"][:200],  # Use title as name
-                "description": f"Event cluster with {cluster['article_count']} articles from {cluster['sources_count']} sources",
-                "representative_article_id": cluster["representative_article_id"],
-                "article_count": cluster["article_count"],
-                "sources_count": cluster["sources_count"],
-                "date_start": cluster["date_start"],
-                "date_end": cluster["date_end"],
-                "centroid": cluster["centroid"],
-                "articles": [
-                    {"article_id": aid, "similarity": 1.0}
-                    for aid in cluster["article_ids"]
-                ]
-            }], result_version_id)
-
-    # Summary
-    total_clustered = len(clustered)
-    multi_source_clusters = sum(1 for c in clusters if c["sources_count"] > 1)
+        db.store_similarity_edges(edges, result_version_id)
 
     summary = {
-        "total_articles": len(article_ids),
-        "articles_clustered": total_clustered,
-        "articles_unclustered": len(article_ids) - total_clustered,
-        "total_clusters": len(clusters),
-        "multi_source_clusters": multi_source_clusters,
-        "avg_cluster_size": np.mean([c["article_count"] for c in clusters]) if clusters else 0,
+        "total_articles": n,
+        "total_edges": len(edges),
+        "storage_threshold": storage_threshold,
     }
 
-    print("\nClustering Complete:")
+    print("\nEdge Storage Complete:")
     print(f"  Total articles: {summary['total_articles']}")
-    print(f"  Articles in clusters: {summary['articles_clustered']}")
-    print(f"  Total clusters: {summary['total_clusters']}")
-    print(f"  Multi-source clusters: {summary['multi_source_clusters']}")
-    print(f"  Avg cluster size: {summary['avg_cluster_size']:.1f}")
+    print(f"  Total edges stored: {summary['total_edges']}")
+    print(f"  Storage threshold: {summary['storage_threshold']}")
 
     return summary
 
 
+def compute_clusters_from_edges(edges, min_cluster_size: int = 2):
+    """Compute connected components (event clusters) from similarity edges.
+
+    Uses networkx connected components, equivalent to Union-Find.
+
+    Args:
+        edges: Iterable of edge dicts (or tuples) with article_id_a, article_id_b,
+               similarity_score. Dict keys or positional access both work.
+        min_cluster_size: Minimum component size to include
+
+    Returns:
+        List of sets, each set containing article ID strings for one cluster.
+        Sorted by size descending.
+    """
+    G = nx.Graph()
+    for edge in edges:
+        if isinstance(edge, dict):
+            id_a = str(edge["article_id_a"])
+            id_b = str(edge["article_id_b"])
+            score = float(edge["similarity_score"])
+        else:
+            id_a, id_b, score = str(edge[0]), str(edge[1]), float(edge[2])
+        G.add_edge(id_a, id_b, weight=score)
+
+    components = [c for c in nx.connected_components(G) if len(c) >= min_cluster_size]
+    components.sort(key=len, reverse=True)
+    return components, G
+
+
 def get_cluster_stats() -> Dict:
-    """Get statistics about event clusters."""
+    """Get statistics about stored similarity edges (legacy compat)."""
     with get_db() as db:
         with db.cursor() as cur:
             schema = db.config["schema"]
-
-            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.event_clusters")
-            total_clusters = cur.fetchone()["count"]
-
-            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.article_clusters")
-            total_mappings = cur.fetchone()["count"]
-
-            cur.execute(f"""
-                SELECT ec.cluster_name, ec.article_count, ec.sources_count,
-                       ec.date_start, ec.date_end
-                FROM {schema}.event_clusters ec
-                ORDER BY ec.article_count DESC
-                LIMIT 10
-            """)
-            top_clusters = cur.fetchall()
+            cur.execute(f"SELECT COUNT(*) as count FROM {schema}.article_similarity_edges")
+            total_edges = cur.fetchone()["count"]
 
     return {
-        "total_clusters": total_clusters,
-        "total_article_mappings": total_mappings,
-        "top_clusters": top_clusters
+        "total_edges": total_edges,
     }
 
 
 if __name__ == "__main__":
-    print("Please use scripts/03_cluster_events.py instead.")
-    print("Usage: python3 scripts/03_cluster_events.py --version-id <uuid>")
+    print("Please use scripts/clustering/02_cluster_events.py instead.")
+    print("Usage: python3 scripts/clustering/02_cluster_events.py --version-id <uuid>")

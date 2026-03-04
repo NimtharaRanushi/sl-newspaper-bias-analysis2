@@ -44,18 +44,16 @@ def main():
 
     summary = cluster_articles(
         result_version_id=args.version_id,
-        similarity_threshold=cluster_config.get("similarity_threshold", 0.8),
-        time_window_days=cluster_config.get("time_window_days", 7),
-        min_cluster_size=cluster_config.get("min_cluster_size", 2),
+        storage_threshold=cluster_config.get("storage_threshold", 0.5),
         embeddings_config=embeddings_config
     )
 
     print("\n" + "=" * 60)
-    print("Clustering Summary:")
+    print("Edge Storage Summary:")
     print("=" * 60)
-    print(f"Total clusters: {summary['total_clusters']}")
-    print(f"Articles clustered: {summary['articles_clustered']}")
-    print(f"Multi-source clusters: {summary['multi_source_clusters']}")
+    print(f"Total articles: {summary['total_articles']}")
+    print(f"Total edges stored: {summary['total_edges']}")
+    print(f"Storage threshold: {summary['storage_threshold']}")
 
     # Update pipeline status
     update_pipeline_status(args.version_id, "clustering", True)

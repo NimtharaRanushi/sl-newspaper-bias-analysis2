@@ -840,6 +840,40 @@ def load_topic_coverage_by_source(topic_name: str, version_id: str):
 
 
 @st.cache_data(ttl=300)
+def load_similarity_edges(version_id, min_similarity: float = 0.8, max_date_diff_days: int = 7):
+    """Load similarity edges for a clustering version, filtered by threshold and date window.
+
+    Args:
+        version_id: The clustering result version UUID
+        min_similarity: Minimum cosine similarity (dashboard slider lower bound)
+        max_date_diff_days: Maximum date difference in days between article pair
+
+    Returns:
+        List of dicts with article_id_a, article_id_b, similarity_score
+    """
+    if not version_id:
+        return []
+    with get_db() as db:
+        return db.get_similarity_edges(version_id, min_similarity, max_date_diff_days)
+
+
+@st.cache_data(ttl=300)
+def load_article_metadata(version_id):
+    """Load metadata for all articles that have embeddings for this version's model.
+
+    Args:
+        version_id: The clustering result version UUID
+
+    Returns:
+        List of dicts with id, title, source_id, date_posted
+    """
+    if not version_id:
+        return []
+    with get_db() as db:
+        return db.get_article_metadata_for_version(version_id)
+
+
+@st.cache_data(ttl=300)
 def load_top_events(version_id=None, limit=20):
     """Load top event clusters for a specific version."""
     if not version_id:
@@ -876,6 +910,15 @@ def load_event_details(event_id, version_id=None):
                 ORDER BY n.date_posted
             """, (event_id,))
             return cur.fetchall()
+
+
+@st.cache_data(ttl=300)
+def load_coverage_matrix(version_id=None):
+    """Load per-source article counts per event cluster for coverage matrix analysis."""
+    if not version_id:
+        return []
+    with get_db() as db:
+        return db.get_coverage_matrix_data(version_id)
 
 
 @st.cache_data(ttl=300)

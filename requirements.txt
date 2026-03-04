@@ -37,5 +37,9 @@ plotly>=5.18.0
 streamlit>=1.30.0
 streamlit-searchbox>=0.1.13  # Autocomplete search component
 
+# Graph analysis and visualization
+networkx>=3.0
+pyvis>=0.3.2
+
 # Utilities
 tqdm>=4.66.0

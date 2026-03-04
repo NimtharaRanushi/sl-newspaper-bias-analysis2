@@ -108,6 +108,139 @@ class ClusteringMixin:
             """, (cluster_id, version_id))
             return cur.fetchall()
 
+    def get_coverage_matrix_data(self, version_id: str) -> List[Dict]:
+        """Get per-source article counts per event cluster for coverage matrix analysis.
+
+        Returns long-format rows: one row per (cluster, source) pair that has
+        at least one article. Missing (cluster, source) combinations are absent
+        and should be filled with 0 in the caller.
+
+        Args:
+            version_id: The clustering result version ID
+
+        Returns:
+            List of dicts with cluster_id, cluster_name, article_count,
+            sources_count, date_start, date_end, source_id, source_article_count
+        """
+        schema = self.config["schema"]
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT
+                    ec.id AS cluster_id,
+                    ec.cluster_name,
+                    ec.article_count,
+                    ec.sources_count,
+                    ec.date_start,
+                    ec.date_end,
+                    n.source_id,
+                    COUNT(n.id) AS source_article_count
+                FROM {schema}.event_clusters ec
+                JOIN {schema}.article_clusters ac ON ec.id = ac.cluster_id
+                    AND ac.result_version_id = %s
+                JOIN {schema}.news_articles n ON ac.article_id = n.id
+                WHERE ec.result_version_id = %s
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
+                GROUP BY ec.id, ec.cluster_name, ec.article_count, ec.sources_count,
+                         ec.date_start, ec.date_end, n.source_id
+                ORDER BY ec.article_count DESC, ec.date_start, n.source_id
+            """, (version_id, version_id))
+            return cur.fetchall()
+
+    def store_similarity_edges(self, edges: List[tuple], result_version_id: str):
+        """Store pairwise similarity edges for a version.
+
+        Clears any existing edges for this version before inserting.
+
+        Args:
+            edges: List of (article_id_a, article_id_b, similarity_score) tuples
+                   where article_id_a < article_id_b (string comparison)
+            result_version_id: UUID of the clustering version
+        """
+        schema = self.config["schema"]
+        with self.cursor(dict_cursor=False) as cur:
+            cur.execute(
+                f"DELETE FROM {schema}.article_similarity_edges WHERE result_version_id = %s",
+                (result_version_id,)
+            )
+            if not edges:
+                return
+            execute_values(
+                cur,
+                f"""
+                INSERT INTO {schema}.article_similarity_edges
+                (result_version_id, article_id_a, article_id_b, similarity_score)
+                VALUES %s
+                """,
+                [(result_version_id, id_a, id_b, score) for id_a, id_b, score in edges],
+                page_size=1000
+            )
+
+    def get_similarity_edges(
+        self,
+        version_id: str,
+        min_similarity: float = 0.8,
+        max_date_diff_days: int = 7
+    ) -> List[Dict]:
+        """Get similarity edges filtered by threshold and date window.
+
+        Args:
+            version_id: The clustering version ID
+            min_similarity: Minimum cosine similarity to include
+            max_date_diff_days: Maximum date difference between articles in days
+
+        Returns:
+            List of dicts with article_id_a, article_id_b, similarity_score
+        """
+        schema = self.config["schema"]
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT e.article_id_a, e.article_id_b, e.similarity_score
+                FROM {schema}.article_similarity_edges e
+                JOIN {schema}.news_articles n_a ON e.article_id_a = n_a.id
+                JOIN {schema}.news_articles n_b ON e.article_id_b = n_b.id
+                WHERE e.result_version_id = %s
+                  AND e.similarity_score >= %s
+                  AND n_a.is_ditwah_cyclone = 1
+                  AND n_b.is_ditwah_cyclone = 1
+                  AND n_a.date_posted >= '2025-11-22' AND n_a.date_posted <= '2025-12-31'
+                  AND n_b.date_posted >= '2025-11-22' AND n_b.date_posted <= '2025-12-31'
+                  AND ABS(n_a.date_posted::date - n_b.date_posted::date) <= %s
+            """, (version_id, min_similarity, max_date_diff_days))
+            return cur.fetchall()
+
+    def get_article_metadata_for_version(self, version_id: str) -> List[Dict]:
+        """Get metadata for all articles that have embeddings for this version's model.
+
+        Args:
+            version_id: The clustering version ID
+
+        Returns:
+            List of dicts with id, title, source_id, date_posted
+        """
+        schema = self.config["schema"]
+        with self.cursor() as cur:
+            cur.execute(f"""
+                SELECT configuration->'embeddings'->>'model' AS embedding_model
+                FROM {schema}.result_versions
+                WHERE id = %s
+            """, (version_id,))
+            row = cur.fetchone()
+            if not row or not row["embedding_model"]:
+                return []
+            embedding_model = row["embedding_model"]
+
+            cur.execute(f"""
+                SELECT DISTINCT n.id, n.title, n.source_id, n.date_posted
+                FROM {schema}.news_articles n
+                JOIN {schema}.embeddings em ON n.id = em.article_id
+                WHERE em.embedding_model = %s
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
+                ORDER BY n.date_posted
+            """, (embedding_model,))
+            return cur.fetchall()
+
     def get_all_clusters_with_counts(
         self,
         version_id: str,
