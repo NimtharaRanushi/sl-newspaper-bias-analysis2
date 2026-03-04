@@ -17,8 +17,6 @@ from data.loaders import (
     load_entity_stance_summary,
     load_entity_stance_summary_by_topic,
     load_entity_stance_examples,
-    load_polarizing_entities,
-    load_entity_stance_detail,
     load_entity_stance_overview,
     load_topics,
 )
@@ -32,23 +30,19 @@ st.title("Entity Stance Detection")
 st.caption("How do different outlets portray the same entities? "
            "NLI-based stance scoring reveals positive/negative framing per entity per source.")
 
-# Version selector
 version_id = render_version_selector('entity_stance')
 
-# Create version button
 render_create_version_button('entity_stance')
 
 if not version_id:
     st.info("Select or create an entity_stance version to view analysis")
     st.stop()
 
-# Get version details
 version = get_version(version_id)
 if not version:
     st.error("Version not found")
     st.stop()
 
-# Check if pipeline is complete
 if not version.get('is_complete'):
     st.warning("Pipeline incomplete. Run the entity stance script:")
     st.code(f"python3 scripts/entity_stance/01_analyze_entity_stance.py --version-id {version_id}")
@@ -56,7 +50,6 @@ if not version.get('is_complete'):
 
 st.divider()
 
-# --- Section 1: Overview metrics ---
 overview = load_entity_stance_overview(version_id)
 
 if not overview or overview.get("total_stances", 0) == 0:
@@ -76,7 +69,6 @@ with col4:
 
 st.divider()
 
-# --- Topic filter (optional) ---
 topic_versions = list_versions('topics')
 topic_version_id_for_filter = None
 selected_topic_bertopic_id = None
