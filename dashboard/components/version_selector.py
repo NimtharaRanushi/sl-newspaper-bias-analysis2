@@ -14,7 +14,8 @@ from src.versions import (
     get_default_ner_config,
     get_default_summarization_config,
     get_default_ditwah_claims_config,
-    get_default_entity_stance_config
+    get_default_entity_stance_config,
+    get_default_chunk_topic_config
 )
 
 
@@ -78,6 +79,8 @@ def render_version_selector(analysis_type):
             status_items.append(f"{'✓' if status.get('ditwah_claims') else '○'} Ditwah Claims")
         elif analysis_type == 'entity_stance':
             status_items.append(f"{'✓' if status.get('entity_stance') else '○'} Entity Stance")
+        elif analysis_type == 'chunk_topics':
+            status_items.append(f"{'✓' if status.get('chunk_topics') else '○'} Chunk Topics")
         elif analysis_type == 'topics':
             status_items.append(f"{'✓' if status.get('topics') else '○'} Topics")
         elif analysis_type == 'clustering':
@@ -160,6 +163,10 @@ def render_create_version_dialog(analysis_type):
             st.markdown("**Step 1: Generate summaries**")
             st.code(f"python3 scripts/summarization/01_generate_summaries.py --version-id {version_id}", language="bash")
 
+        elif analysis_type == 'chunk_topics':
+            st.markdown("**Run chunk-level topic discovery:**")
+            st.code(f"PYTHONHASHSEED=42 python3 scripts/chunk_topics/01_discover_chunk_topics.py --version-id {version_id}", language="bash")
+
         elif analysis_type == 'topics':
             st.markdown("**Run topic discovery:**")
             st.code(f"python3 scripts/topics/02_discover_topics.py --version-id {version_id}", language="bash")
@@ -210,6 +217,8 @@ def render_create_version_dialog(analysis_type):
         default_config = get_default_ditwah_claims_config()
     elif analysis_type == 'entity_stance':
         default_config = get_default_entity_stance_config()
+    elif analysis_type == 'chunk_topics':
+        default_config = get_default_chunk_topic_config()
     else:
         default_config = {}
 

@@ -2349,3 +2349,59 @@ def load_entity_stance_overview(version_id):
                 WHERE result_version_id = %s
             """, (version_id,))
             return dict(cur.fetchone())
+
+
+# --- Chunk-Level Topics ---
+
+@st.cache_data(ttl=300)
+def load_chunk_topics(version_id):
+    """Load chunk topics with counts for a version."""
+    if not version_id:
+        return []
+    with get_db() as db:
+        return db.get_chunk_topics_with_counts(version_id)
+
+
+@st.cache_data(ttl=300)
+def load_chunk_topic_by_source(version_id):
+    """Load chunk counts per topic per source."""
+    if not version_id:
+        return []
+    with get_db() as db:
+        return db.get_chunk_topic_by_source(version_id)
+
+
+@st.cache_data(ttl=300)
+def load_chunks_by_topic(version_id, topic_db_id, source_id=None, limit=50):
+    """Load chunks for a specific topic."""
+    if not version_id or not topic_db_id:
+        return []
+    with get_db() as db:
+        return db.get_chunks_by_topic(topic_db_id, version_id, source_id=source_id, limit=limit)
+
+
+@st.cache_data(ttl=300)
+def load_chunk_topic_stats(version_id):
+    """Load summary statistics for chunk topic analysis."""
+    if not version_id:
+        return {}
+    with get_db() as db:
+        return db.get_chunk_topic_stats(version_id)
+
+
+@st.cache_data(ttl=300)
+def load_outlier_chunks(version_id, source_id=None, limit=50):
+    """Load chunks not assigned to any topic cluster (outliers)."""
+    if not version_id:
+        return []
+    with get_db() as db:
+        return db.get_outlier_chunks(version_id, source_id=source_id, limit=limit)
+
+
+@st.cache_data(ttl=300)
+def load_chunk_outlet_totals(version_id):
+    """Load total chunk counts per outlet (including outliers)."""
+    if not version_id:
+        return {}
+    with get_db() as db:
+        return db.get_chunk_outlet_totals(version_id)

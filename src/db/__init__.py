@@ -11,6 +11,7 @@ from src.db._ner import NERMixin
 from src.db._entity_stance import EntityStanceMixin
 from src.db._word_frequency import WordFrequencyMixin
 from src.db._summaries import SummaryMixin
+from src.db._chunk_topics import ChunkTopicMixin
 
 
 class Database(
@@ -23,6 +24,7 @@ class Database(
     EntityStanceMixin,
     WordFrequencyMixin,
     SummaryMixin,
+    ChunkTopicMixin,
     DatabaseConnection,
 ):
     """PostgreSQL database connection manager."""

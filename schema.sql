@@ -485,3 +485,47 @@ CREATE INDEX IF NOT EXISTS idx_entity_stance_version ON media_bias.entity_stance
 CREATE INDEX IF NOT EXISTS idx_entity_stance_article ON media_bias.entity_stance(article_id);
 CREATE INDEX IF NOT EXISTS idx_entity_stance_entity_text ON media_bias.entity_stance(entity_text);
 CREATE INDEX IF NOT EXISTS idx_entity_stance_entity_type ON media_bias.entity_stance(entity_type);
+
+-- Chunk-Level Topic Analysis
+-- Article chunks (sentence-window based, tied to version for reproducibility)
+CREATE TABLE IF NOT EXISTS media_bias.article_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    article_id UUID NOT NULL REFERENCES media_bias.news_articles(id) ON DELETE CASCADE,
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(article_id, result_version_id, chunk_index)
+);
+
+-- Chunk-level topics
+CREATE TABLE IF NOT EXISTS media_bias.chunk_topics (
+    id SERIAL PRIMARY KEY,
+    topic_id INTEGER NOT NULL,
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    keywords TEXT[],
+    chunk_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(topic_id, result_version_id)
+);
+
+-- Chunk-to-topic assignments
+CREATE TABLE IF NOT EXISTS media_bias.chunk_topic_assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chunk_id UUID NOT NULL REFERENCES media_bias.article_chunks(id) ON DELETE CASCADE,
+    result_version_id UUID NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    topic_id INTEGER REFERENCES media_bias.chunk_topics(id),
+    confidence FLOAT,
+    UNIQUE(chunk_id, result_version_id)
+);
+
+-- Indexes for chunk topic analysis
+CREATE INDEX IF NOT EXISTS idx_article_chunks_version ON media_bias.article_chunks(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_article_chunks_article ON media_bias.article_chunks(article_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_topics_version ON media_bias.chunk_topics(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_topic_assign_version ON media_bias.chunk_topic_assignments(result_version_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_topic_assign_chunk ON media_bias.chunk_topic_assignments(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_topic_assign_topic ON media_bias.chunk_topic_assignments(topic_id);

@@ -334,6 +334,46 @@ def get_default_entity_stance_config() -> Dict[str, Any]:
     }
 
 
+def get_default_chunk_topic_config() -> Dict[str, Any]:
+    """Get default configuration for chunk-level topic analysis.
+
+    Returns:
+        Dictionary with configuration for chunking, embeddings, and topics.
+    """
+    config = load_config()
+
+    return {
+        "embeddings": {
+            "provider": config["embeddings"]["provider"],
+            "model": config["embeddings"]["model"]
+        },
+        "chunking": {
+            "chunk_size": 5,
+            "min_chunk_sentences": 2,
+        },
+        "topics": {
+            "min_topic_size": 10,
+            "stop_words": ["sri", "lanka", "lankan", "lankans"],
+            "umap": {
+                "n_neighbors": 15,
+                "n_components": 5,
+                "min_dist": 0.0,
+                "metric": "cosine"
+            },
+            "hdbscan": {
+                "min_cluster_size": 10,
+                "metric": "euclidean",
+                "cluster_selection_method": "eom",
+                "core_dist_n_jobs": 1
+            },
+            "vectorizer": {
+                "ngram_range": [1, 3],
+                "min_df": 3
+            }
+        }
+    }
+
+
 def create_version(
     name: str,
     description: str = "",
@@ -355,7 +395,7 @@ def create_version(
     Raises:
         ValueError: If version name already exists for the same analysis type
     """
-    valid_types = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'multi_doc_summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'combined']
+    valid_types = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'multi_doc_summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'chunk_topics', 'combined']
     if analysis_type not in valid_types:
         raise ValueError(f"Invalid analysis_type: {analysis_type}. Must be one of {valid_types}")
 
@@ -590,7 +630,7 @@ def update_pipeline_status(
         step: Pipeline step name ('embeddings', 'topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', or 'ditwah_claims')
         complete: Whether the step is complete
     """
-    valid_steps = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', 'ditwah_claims', 'entity_stance']
+    valid_steps = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'chunk_topics']
     if step not in valid_steps:
         raise ValueError(f"Invalid step: {step}. Must be one of {valid_steps}")
 
@@ -633,6 +673,8 @@ def update_pipeline_status(
                             (pipeline_status->>'ditwah_claims')::boolean
                         WHEN 'entity_stance' THEN
                             (pipeline_status->>'entity_stance')::boolean
+                        WHEN 'chunk_topics' THEN
+                            (pipeline_status->>'chunk_topics')::boolean
                         WHEN 'combined' THEN
                             (pipeline_status->>'embeddings')::boolean AND
                             (pipeline_status->>'topics')::boolean AND
