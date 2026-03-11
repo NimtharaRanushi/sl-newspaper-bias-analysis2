@@ -1,7 +1,7 @@
 """Event clustering: store pairwise similarity edges for dynamic runtime clustering."""
 
 import numpy as np
-from typing import Dict, List, Set
+from typing import Dict
 import networkx as nx
 
 from sklearn.metrics.pairwise import cosine_similarity
