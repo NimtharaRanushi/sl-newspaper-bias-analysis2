@@ -8,7 +8,7 @@ Detects stance toward named entities in news articles by:
 """
 
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
