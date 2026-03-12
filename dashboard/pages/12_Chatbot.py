@@ -632,10 +632,6 @@ if "chatbot_question" in st.session_state:
     )
 
     with st.expander("View source articles", expanded=False):
-        st.caption(
-            "Ranked by semantic similarity. "
-            "Links may require access to the original news sources."
-        )
         excerpt_len = 400 if show_full_excerpt else 200
         for rank, art in enumerate(stored_articles, 1):
             source_name  = SOURCE_NAMES.get(art["source_id"], art["source_id"])
@@ -648,25 +644,28 @@ if "chatbot_question" in st.session_state:
             raw     = (art.get("content") or "").strip()
             excerpt = raw[:excerpt_len] + ("…" if len(raw) > excerpt_len else "")
 
-            with st.container(border=True):
-                col_meta, col_sim = st.columns([5, 1])
-                with col_meta:
-                    st.markdown(
-                        f"**#{rank}** &nbsp;"
-                        f'<span style="background:{source_color};color:#fff;'
-                        f'padding:2px 8px;border-radius:10px;font-size:0.8em;">'
-                        f"{source_name}</span>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(f"**{art['title']}**")
-                    st.caption(date_str)
-                with col_sim:
-                    st.metric("Match", f"{sim_pct}%")
-                st.markdown(excerpt)
+            if rank > 1:
+                st.divider()
+            st.markdown(
+                f"**#{rank}** &nbsp;"
+                f'<span style="background:{source_color};color:#fff;padding:2px 8px;border-radius:10px;font-size:0.8em;">'
+                f"{source_name}</span> &nbsp; "
+                f'<span style="color:#888;font-size:0.9em;">{sim_pct}% match</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"**{art['title']}**")
+            st.caption(date_str)
+            st.markdown(excerpt)
+            col_link, col_btn = st.columns([1, 1])
+            with col_link:
                 if art.get("url"):
-                    st.markdown(f"[View full article]({art['url']})")
+                    st.link_button("View full article", art["url"])
                 else:
                     st.caption("No URL available")
+            with col_btn:
+                if st.button("Open in Article Insights →", key=f"insights_{art['id']}"):
+                    st.query_params["article_id"] = str(art["id"])
+                    st.switch_page("pages/10_Article_Insights.py")
 
     # ---- Question stance section ----
     hypothesis = st.session_state.get("chatbot_hypothesis")

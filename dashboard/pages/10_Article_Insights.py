@@ -5,6 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import time
+
 import streamlit as st
 import pandas as pd
 from streamlit_searchbox import st_searchbox
@@ -35,8 +37,6 @@ apply_page_style()
 
 st.title("Article Insights")
 
-st.subheader("Search & Select Article")
-
 if 'article_mapping' not in st.session_state:
     st.session_state.article_mapping = {}
 
@@ -63,20 +63,40 @@ def search_articles(search_term: str) -> list:
     return suggestions
 
 
+_preselect_id = st.query_params.get("article_id")
+if _preselect_id and st.session_state.get('_preselect_handled_id') != _preselect_id:
+    _pre_article = load_article_by_id(_preselect_id)
+    if _pre_article:
+        _source_name = SOURCE_NAMES.get(_pre_article["source_id"], _pre_article["source_id"])
+        _date_str = _pre_article["date_posted"].strftime("%Y-%m-%d") if _pre_article["date_posted"] else "Unknown"
+        _label = f"{_pre_article['title']} - {_source_name} ({_date_str})"
+        st.session_state.article_mapping[_label] = _pre_article["id"]
+        st.session_state["article_searchbox"] = {
+            "result": _label,
+            "search": _label,
+            "options_js": [{"label": _label, "value": 0}],
+            "options_py": [_label],
+            "key_react": f"article_searchbox_react_{time.time()}",
+        }
+        st.session_state['_preselect_handled_id'] = _preselect_id
+
 selected_label = st_searchbox(
     search_articles,
     key="article_searchbox",
     placeholder="Start typing to search articles by title...",
-    label="Search by title",
     clear_on_submit=False,
     rerun_on_update=True
 )
 
 if not selected_label:
-    st.info("👆 Start typing in the search box to find articles")
+    if "article_id" in st.query_params:
+        del st.query_params["article_id"]
     st.stop()
 
 article_id = st.session_state.article_mapping.get(selected_label)
+
+if article_id:
+    st.query_params["article_id"] = str(article_id)
 
 if not article_id:
     st.info("Start typing in the search box to find articles")
@@ -101,7 +121,7 @@ st.markdown(f"**Title:** {article['title']}")
 source_name = SOURCE_NAMES.get(article['source_id'], article['source_id'])
 st.markdown(f"**Source:** {source_name}")
 if article['date_posted']:
-    st.markdown(f"**Published:** {article['date_posted'].strftime('%Y-%m-%d')}")
+    st.markdown(f"**Published On:** {article['date_posted'].strftime('%Y-%m-%d')}")
 if article['url']:
     st.markdown(f"[View original article]({article['url']})")
 
@@ -621,71 +641,3 @@ if ner_versions:
 else:
     st.info("No NER versions found. Create and run an NER version first.")
 
-
-st.markdown("### Event Clustering")
-
-clustering_versions = list_versions(analysis_type='clustering')
-
-if clustering_versions:
-    clustering_version_options = {
-        f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id']
-        for v in clustering_versions
-    }
-
-    selected_clustering_version_label = st.selectbox(
-        "Clustering Version",
-        options=list(clustering_version_options.keys()),
-        key="clustering_version_selector"
-    )
-
-    clustering_version_id = clustering_version_options[selected_clustering_version_label]
-    cluster = load_article_cluster(article_id, clustering_version_id)
-
-    if cluster:
-        st.markdown(f"**Event Cluster:** {cluster['cluster_name']}")
-        st.markdown(f"**Cluster Size:** {cluster['article_count']} articles from {cluster['sources_count']} sources")
-
-        if cluster.get('other_sources'):
-            other_sources = [s for s in cluster['other_sources'] if s]
-            if other_sources:
-                source_names = [SOURCE_NAMES.get(s, s) for s in other_sources]
-                st.markdown(f"**Other sources:** {', '.join(source_names)}")
-
-        if cluster.get('date_start') and cluster.get('date_end'):
-            date_range = f"{cluster['date_start'].strftime('%Y-%m-%d')} to {cluster['date_end'].strftime('%Y-%m-%d')}"
-            st.markdown(f"**Event Period:** {date_range}")
-
-        cluster_articles = load_event_details(cluster['cluster_id'], clustering_version_id)
-
-        if cluster_articles:
-            st.markdown("**Articles in this cluster:**")
-
-            articles_data = []
-            for art in cluster_articles:
-                source_name = SOURCE_NAMES.get(art['source_id'], art['source_id'])
-                date_str = art['date_posted'].strftime('%Y-%m-%d') if art['date_posted'] else 'Unknown'
-                articles_data.append({
-                    'Title': art['title'],
-                    'Source': source_name,
-                    'Date': date_str,
-                    'URL': art['url'] if art['url'] else ''
-                })
-
-            df = pd.DataFrame(articles_data)
-
-            st.dataframe(
-                df,
-                column_config={
-                    "URL": st.column_config.LinkColumn("URL", display_text="View"),
-                    "Title": st.column_config.TextColumn("Title", width="large"),
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-    else:
-        st.info("Article is not part of any event cluster (outlier)")
-else:
-    st.info("No clustering versions found. Create and run a clustering version first.")
-
-# Footer
-st.divider()
