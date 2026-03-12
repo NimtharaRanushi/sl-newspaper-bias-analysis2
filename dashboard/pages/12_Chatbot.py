@@ -664,8 +664,7 @@ if "chatbot_question" in st.session_state:
                     st.caption("No URL available")
             with col_btn:
                 if st.button("Open in Article Insights →", key=f"insights_{art['id']}"):
-                    st.query_params["article_id"] = str(art["id"])
-                    st.switch_page("pages/10_Article_Insights.py")
+                    st.switch_page("pages/10_Article_Insights.py", query_params={"article_id": str(art["id"])})
 
         col_prev, col_info, col_next = st.columns([1, 2, 1])
         with col_prev:

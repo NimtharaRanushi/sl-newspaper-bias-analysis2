@@ -35,7 +35,46 @@ from components.styling import apply_page_style
 
 apply_page_style()
 
-st.title("Article Insights")
+col_title, col_settings = st.columns([10, 1])
+with col_title:
+    st.title("Article Insights")
+with col_settings:
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.popover("⚙️", use_container_width=False):
+        topic_versions = list_versions(analysis_type='topics')
+        topic_version_id = None
+        if topic_versions:
+            topic_version_options = {f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id'] for v in topic_versions}
+            selected_topic_version_label = st.selectbox("Topic Version", list(topic_version_options.keys()), key="topic_version_selector")
+            topic_version_id = topic_version_options[selected_topic_version_label]
+
+        available_models = get_available_sentiment_models()
+        sentiment_model = None
+        if available_models:
+            sentiment_model = st.selectbox("Sentiment Model", available_models,
+                index=available_models.index('roberta') if 'roberta' in available_models else 0,
+                key="sentiment_model_selector")
+
+        summarization_versions = list_versions(analysis_type='summarization')
+        summary_version_id = None
+        if summarization_versions:
+            summary_version_options = {f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id'] for v in summarization_versions}
+            selected_summary_version_label = st.selectbox("Summarization Version", list(summary_version_options.keys()), key="summary_version_selector")
+            summary_version_id = summary_version_options[selected_summary_version_label]
+
+        multi_doc_versions = list_versions(analysis_type='multi_doc_summarization')
+        multi_doc_version_id = None
+        if multi_doc_versions:
+            multi_doc_version_options = {f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id'] for v in multi_doc_versions}
+            selected_multi_doc_label = st.selectbox("Multi-Doc Summarization Version", list(multi_doc_version_options.keys()), key="multi_doc_version_selector")
+            multi_doc_version_id = multi_doc_version_options[selected_multi_doc_label]
+
+        ner_versions = list_versions(analysis_type='ner')
+        ner_version_id = None
+        if ner_versions:
+            ner_version_options = {f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id'] for v in ner_versions}
+            selected_ner_version_label = st.selectbox("NER Version", list(ner_version_options.keys()), key="ner_version_selector")
+            ner_version_id = ner_version_options[selected_ner_version_label]
 
 if 'article_mapping' not in st.session_state:
     st.session_state.article_mapping = {}
@@ -64,6 +103,10 @@ def search_articles(search_term: str) -> list:
 
 
 _preselect_id = st.query_params.get("article_id")
+if not _preselect_id and st.session_state.get('_preselect_handled_id'):
+    # Navigated away from a deep-linked article — clear stale searchbox state
+    st.session_state.pop("article_searchbox", None)
+    st.session_state.pop("_preselect_handled_id", None)
 if _preselect_id and st.session_state.get('_preselect_handled_id') != _preselect_id:
     _pre_article = load_article_by_id(_preselect_id)
     if _pre_article:
@@ -110,7 +153,7 @@ if not article:
 
 # Initialize variables for multi-document summaries
 topic_data = None
-topic_version_id = None
+sentiment = None
 cluster = None
 clustering_version_id = None
 
@@ -129,21 +172,7 @@ st.divider()
 
 st.markdown("### Topic Assignment")
 
-topic_versions = list_versions(analysis_type='topics')
-
-if topic_versions:
-    topic_version_options = {
-        f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id']
-        for v in topic_versions
-    }
-
-    selected_topic_version_label = st.selectbox(
-        "Topic Version",
-        options=list(topic_version_options.keys()),
-        key="topic_version_selector"
-    )
-
-    topic_version_id = topic_version_options[selected_topic_version_label]
+if topic_version_id:
     topic_data = load_article_topic(article_id, topic_version_id)
 
     if topic_data:
@@ -210,16 +239,7 @@ else:
 
 st.markdown("### Sentiment Analysis")
 
-available_models = get_available_sentiment_models()
-
-if available_models:
-    sentiment_model = st.selectbox(
-        "Sentiment Model",
-        options=available_models,
-        index=available_models.index('roberta') if 'roberta' in available_models else 0,
-        key="sentiment_model_selector"
-    )
-
+if sentiment_model:
     sentiment = load_article_sentiment(article_id, sentiment_model)
 
     if sentiment:
@@ -407,21 +427,7 @@ else:
 st.divider()
 st.markdown("### Summary")
 
-summarization_versions = list_versions(analysis_type='summarization')
-
-if summarization_versions:
-    summary_version_options = {
-        f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id']
-        for v in summarization_versions
-    }
-
-    selected_summary_version_label = st.selectbox(
-        "Summarization Version",
-        options=list(summary_version_options.keys()),
-        key="summary_version_selector"
-    )
-
-    summary_version_id = summary_version_options[selected_summary_version_label]
+if summary_version_id:
     summary = load_article_summary(article_id, summary_version_id)
 
     if summary:
@@ -436,23 +442,7 @@ else:
 if topic_data:
     st.markdown("#### What Other Articles in This Topic Covered")
 
-    # Multi-doc summarization version selector
-    multi_doc_versions = list_versions(analysis_type='multi_doc_summarization')
-
-    if multi_doc_versions:
-        multi_doc_version_options = {
-            f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id']
-            for v in multi_doc_versions
-        }
-
-        selected_multi_doc_version_label = st.selectbox(
-            "Multi-Doc Summarization Version",
-            options=list(multi_doc_version_options.keys()),
-            key="topic_multi_doc_version_selector"
-        )
-
-        multi_doc_version_id = multi_doc_version_options[selected_multi_doc_version_label]
-
+    if multi_doc_version_id:
         # Show version config
         selected_version = [v for v in multi_doc_versions if v['id'] == multi_doc_version_id][0]
         mds_config = selected_version['configuration'].get('multi_doc_summarization', {})
@@ -513,25 +503,9 @@ else:
 if cluster:
     st.markdown("#### 📰 What Other Sources Reported on This Event")
 
-    # Multi-doc summarization version selector
-    multi_doc_versions_cluster = list_versions(analysis_type='multi_doc_summarization')
-
-    if multi_doc_versions_cluster:
-        multi_doc_version_options_cluster = {
-            f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id']
-            for v in multi_doc_versions_cluster
-        }
-
-        selected_multi_doc_version_label_cluster = st.selectbox(
-            "Multi-Doc Summarization Version",
-            options=list(multi_doc_version_options_cluster.keys()),
-            key="cluster_multi_doc_version_selector"
-        )
-
-        multi_doc_version_id_cluster = multi_doc_version_options_cluster[selected_multi_doc_version_label_cluster]
-
+    if multi_doc_version_id:
         # Show version config
-        selected_version_cluster = [v for v in multi_doc_versions_cluster if v['id'] == multi_doc_version_id_cluster][0]
+        selected_version_cluster = [v for v in multi_doc_versions if v['id'] == multi_doc_version_id][0]
         mds_config_cluster = selected_version_cluster['configuration'].get('multi_doc_summarization', {})
         method_cluster = mds_config_cluster.get('method', 'gemini')
         model_cluster = mds_config_cluster.get('llm_model', 'N/A')
@@ -541,7 +515,7 @@ if cluster:
             cluster_summary = load_multi_doc_summary_for_cluster(
                 article_id=article_id,
                 cluster_version_id=clustering_version_id,
-                multi_doc_version_id=multi_doc_version_id_cluster
+                multi_doc_version_id=multi_doc_version_id
             )
 
         if cluster_summary and 'error' not in cluster_summary:
@@ -591,21 +565,7 @@ st.divider()
 # Named Entities Section
 st.markdown("### Actors Involved")
 
-ner_versions = list_versions(analysis_type='ner')
-
-if ner_versions:
-    ner_version_options = {
-        f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id']
-        for v in ner_versions
-    }
-
-    selected_ner_version_label = st.selectbox(
-        "NER Version",
-        options=list(ner_version_options.keys()),
-        key="ner_version_selector"
-    )
-
-    ner_version_id = ner_version_options[selected_ner_version_label]
+if ner_version_id:
     entities = load_article_entities(article_id, ner_version_id)
 
     if entities:
