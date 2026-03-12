@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import math
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
@@ -111,8 +112,8 @@ def _embedding_to_pg_str(embedding: list) -> str:
     return "[" + ",".join(str(v) for v in embedding) + "]"
 
 
-def search_ditwah_articles(question_embedding: list, embedding_model: str, top_k: int) -> list:
-    """Semantic search: top-K Ditwah articles by cosine similarity."""
+def search_ditwah_articles(question_embedding: list, embedding_model: str, min_similarity: float = 0.6) -> list:
+    """Semantic search: Ditwah articles above a cosine similarity threshold (hard cap 50)."""
     pg_vec = _embedding_to_pg_str(question_embedding)
     with get_db() as db:
         schema = db.config["schema"]
@@ -125,10 +126,11 @@ def search_ditwah_articles(question_embedding: list, embedding_model: str, top_k
                 JOIN {schema}.news_articles n ON e.article_id = n.id
                 WHERE n.is_ditwah_cyclone = 1
                   AND e.embedding_model = %s
+                  AND 1 - (e.embedding <=> %s::vector) >= %s
                 ORDER BY e.embedding <=> %s::vector
-                LIMIT %s
+                LIMIT 50
                 """,
-                (pg_vec, embedding_model, pg_vec, top_k),
+                (pg_vec, embedding_model, pg_vec, min_similarity, pg_vec),
             )
             return cur.fetchall()
 
@@ -527,47 +529,36 @@ def render_stance_chart(stance_rows: list):
 
 
 # ============================================================================
-# Sidebar
-# ============================================================================
-
-with st.sidebar:
-    st.header("Settings")
-
-    # --- Embedding model ---
-    emb_models = get_available_embedding_models()
-    if not emb_models:
-        st.error("No Ditwah embeddings found.")
-        st.stop()
-
-    model_options = {
-        f"{m['embedding_model']} ({m['article_count']} articles)": m["embedding_model"]
-        for m in emb_models
-    }
-    selected_model = model_options[
-        st.selectbox("Embedding model", list(model_options.keys()), index=0,
-                     help="Question and articles are embedded with the same model.")
-    ]
-
-    st.divider()
-
-    top_k = st.slider("Articles to retrieve", min_value=3, max_value=15, value=8, step=1,
-                      help="Top-K articles by semantic similarity. Top 10 used for the answer.")
-    show_full_excerpt = st.checkbox("Show longer excerpts", value=False)
-
-    st.divider()
-    total = get_total_ditwah_count()
-    st.metric("Total Ditwah articles", total)
-
-
-# ============================================================================
 # Main UI
 # ============================================================================
 
-st.title("💬 Ditwah Cyclone Chatbot")
-st.caption(
-    "Ask any question about Cyclone Ditwah. Get an answer grounded in newspaper articles, "
-    "then explore how each source stands on the related claims."
-)
+emb_models = get_available_embedding_models()
+if not emb_models:
+    st.error("No Ditwah embeddings found.")
+    st.stop()
+
+model_options = {
+    m["embedding_model"]: m["embedding_model"]
+    for m in emb_models
+}
+
+col_title, col_settings = st.columns([5, 1])
+with col_title:
+    st.title("💬 Ditwah Cyclone Chatbot")
+    st.caption(
+        "Ask any question about Cyclone Ditwah. Get an answer grounded in newspaper articles, "
+        "then explore how each source stands on the related claims."
+    )
+with col_settings:
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.popover("⚙️"):
+        selected_label = st.selectbox(
+            "Embedding model",
+            list(model_options.keys()),
+            index=0,
+            help="Question and articles are embedded with the same model.",
+        )
+        selected_model = model_options[selected_label]
 
 # --- Chat input ---
 question = st.chat_input("Ask a question about Cyclone Ditwah…")
@@ -583,7 +574,7 @@ if question:
             q_embedding = embed_client.embed_single(question)
 
         with st.spinner("Searching articles…"):
-            articles = search_ditwah_articles(q_embedding, selected_model, top_k)
+            articles = search_ditwah_articles(q_embedding, selected_model)
 
         if not articles:
             st.warning("No relevant Ditwah articles found. Try rephrasing your question.")
@@ -604,6 +595,7 @@ if question:
         st.session_state["chatbot_hypothesis"] = hypothesis
         st.session_state["chatbot_dynamic_claims"] = dynamic_claims
         st.session_state["chatbot_stance_cache"] = {}   # reset cache for new question
+        st.session_state["chatbot_article_page"] = 0
 
         st.markdown(answer)
 
@@ -620,6 +612,8 @@ if "chatbot_question" in st.session_state:
         with st.chat_message("assistant"):
             st.markdown(stored_answer)
 
+    total = get_total_ditwah_count()
+
     article_ids = tuple(str(a["id"]) for a in stored_articles)
     n = len(stored_articles)
 
@@ -632,8 +626,14 @@ if "chatbot_question" in st.session_state:
     )
 
     with st.expander("View source articles", expanded=False):
-        excerpt_len = 400 if show_full_excerpt else 200
-        for rank, art in enumerate(stored_articles, 1):
+        excerpt_len = 400
+
+        PAGE_SIZE = 5
+        total_pages = max(1, math.ceil(n / PAGE_SIZE))
+        page = st.session_state.get("chatbot_article_page", 0)
+        page_articles = stored_articles[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+        for rank, art in enumerate(page_articles, page * PAGE_SIZE + 1):
             source_name  = SOURCE_NAMES.get(art["source_id"], art["source_id"])
             source_color = SOURCE_COLORS.get(source_name, "#888888")
             date_str = (
@@ -644,7 +644,7 @@ if "chatbot_question" in st.session_state:
             raw     = (art.get("content") or "").strip()
             excerpt = raw[:excerpt_len] + ("…" if len(raw) > excerpt_len else "")
 
-            if rank > 1:
+            if rank > page * PAGE_SIZE + 1:
                 st.divider()
             st.markdown(
                 f"**#{rank}** &nbsp;"
@@ -666,6 +666,18 @@ if "chatbot_question" in st.session_state:
                 if st.button("Open in Article Insights →", key=f"insights_{art['id']}"):
                     st.query_params["article_id"] = str(art["id"])
                     st.switch_page("pages/10_Article_Insights.py")
+
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("← Prev", disabled=(page == 0), key="art_prev"):
+                st.session_state["chatbot_article_page"] = page - 1
+                st.rerun()
+        with col_info:
+            st.caption(f"Page {page + 1} of {total_pages} ({n} articles)")
+        with col_next:
+            if st.button("Next →", disabled=(page >= total_pages - 1), key="art_next"):
+                st.session_state["chatbot_article_page"] = page + 1
+                st.rerun()
 
     # ---- Question stance section ----
     hypothesis = st.session_state.get("chatbot_hypothesis")
