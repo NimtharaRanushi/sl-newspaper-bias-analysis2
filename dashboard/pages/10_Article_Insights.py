@@ -21,8 +21,7 @@ from data.loaders import (
     load_article_topic,
     load_article_summary,
     load_article_entities,
-    load_article_cluster,
-    load_event_details,
+    load_article_quotes,
     get_available_sentiment_models,
     load_topic_coverage_by_source,
     load_sentiment_by_source_topic,
@@ -75,6 +74,13 @@ with col_settings:
             ner_version_options = {f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id'] for v in ner_versions}
             selected_ner_version_label = st.selectbox("NER Version", list(ner_version_options.keys()), key="ner_version_selector")
             ner_version_id = ner_version_options[selected_ner_version_label]
+
+        quote_versions = list_versions(analysis_type='quote_extraction')
+        quote_version_id = None
+        if quote_versions:
+            quote_version_options = {f"{v['name']} ({v['created_at'].strftime('%Y-%m-%d')})": v['id'] for v in quote_versions}
+            selected_quote_version_label = st.selectbox("Quote Extraction Version", list(quote_version_options.keys()), key="quote_version_selector")
+            quote_version_id = quote_version_options[selected_quote_version_label]
 
 if 'article_mapping' not in st.session_state:
     st.session_state.article_mapping = {}
@@ -423,6 +429,26 @@ if article.get('is_ditwah_cyclone'):
         st.info("This article does not mention any tracked claims")
 else:
     st.info("Claims analysis is only available for Cyclone Ditwah articles")
+
+st.markdown("### Quotes")
+
+if article.get('is_ditwah_cyclone'):
+    if quote_version_id:
+        quotes = load_article_quotes(article_id, quote_version_id)
+
+        if quotes:
+            for q in quotes:
+                source_str = f" — *{q['source']}*" if q['source'] else ""
+                cue_str = f" ({q['cue']})" if q['cue'] else ""
+                qt_badge = q['quote_type'].replace('_', ' ').title()
+                st.markdown(f"> {q['content']}")
+                st.caption(f"{qt_badge}{source_str}{cue_str}")
+        else:
+            st.info("No quotes extracted for this article in this version")
+    else:
+        st.info("No quote extraction versions found. Create and run a quote extraction version first.")
+else:
+    st.info("Quote extraction is only available for Cyclone Ditwah articles")
 
 st.divider()
 st.markdown("### Summary")

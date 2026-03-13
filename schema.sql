@@ -529,3 +529,19 @@ CREATE INDEX IF NOT EXISTS idx_chunk_topics_version ON media_bias.chunk_topics(r
 CREATE INDEX IF NOT EXISTS idx_chunk_topic_assign_version ON media_bias.chunk_topic_assignments(result_version_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_topic_assign_chunk ON media_bias.chunk_topic_assignments(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_topic_assign_topic ON media_bias.chunk_topic_assignments(topic_id);
+
+-- Quotes extracted from articles (LLM-based)
+CREATE TABLE IF NOT EXISTS media_bias.article_quotes (
+    id                SERIAL PRIMARY KEY,
+    article_id        UUID    NOT NULL REFERENCES media_bias.news_articles(id),
+    result_version_id UUID    NOT NULL REFERENCES media_bias.result_versions(id) ON DELETE CASCADE,
+    quote_content     TEXT    NOT NULL,
+    quote_source      TEXT,
+    cue               TEXT,
+    quote_type        TEXT    NOT NULL,
+    quote_order       INTEGER NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (article_id, result_version_id, quote_order)
+);
+CREATE INDEX IF NOT EXISTS idx_article_quotes_article_version
+    ON media_bias.article_quotes(article_id, result_version_id);

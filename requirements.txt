@@ -8,6 +8,7 @@ pgvector>=0.2.4
 # LLM Clients
 anthropic>=0.18.0
 openai>=1.12.0
+pydantic>=2.0.0  # Structured output validation for quote extraction
 google-genai>=0.3.0
 mistralai>=1.0.0
 

@@ -1811,6 +1811,17 @@ def load_article_entities(article_id: int, version_id: str):
 
 
 @st.cache_data(ttl=300)
+def load_article_quotes(article_id: str, version_id: str):
+    """Load quotes for article in document order.
+
+    Returns:
+        List of dicts with [content, source, cue, quote_type, quote_order]
+    """
+    with get_db() as db:
+        return db.get_quotes_for_article(article_id, version_id)
+
+
+@st.cache_data(ttl=300)
 def load_article_cluster(article_id: int, version_id: str):
     """Load event cluster assignment.
 
