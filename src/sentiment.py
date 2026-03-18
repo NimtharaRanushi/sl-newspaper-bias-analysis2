@@ -512,11 +512,107 @@ class TextBlobSentimentAnalyzer(SentimentAnalyzer):
         return results
 
 
+class SentimentRAnalyzer(SentimentAnalyzer):
+    """R's sentimentr package via rpy2.
+
+    sentimentr handles valence shifters: negators, amplifiers,
+    de-amplifiers, and adversative conjunctions ("but").
+
+    Requires: R + sentimentr package, and rpy2 Python package.
+    Install: pip install rpy2
+             R: install.packages("sentimentr")
+
+    Output: ave_sentiment in ~[-1, +1], scaled to [-5, +5]
+    Confidence: derived from sentence-level standard deviation
+    """
+
+    def __init__(self, config: dict = None):
+        super().__init__(config)
+        self.model_type = "sentimentr"
+        self.model_name = "sentimentR"
+        self.model_config = self.sentiment_config.get("sentimentr", {})
+        self.batch_size = self.model_config.get("batch_size", 64)
+        self._load_r()
+
+    def _load_r(self):
+        """Load rpy2 and R's sentimentr package."""
+        try:
+            import rpy2.robjects as ro
+            from rpy2.robjects.packages import importr
+            import rpy2.robjects.vectors as rvectors
+            from rpy2.rinterface_lib.callbacks import logger as rpy2_logger
+            import logging
+            rpy2_logger.setLevel(logging.ERROR)
+            self._ro = ro
+            self._rvectors = rvectors
+            self._sentimentr = importr('sentimentr')
+        except ImportError:
+            raise ImportError(
+                "rpy2 is required for sentimentr. Install with: pip install rpy2\n"
+                "Also ensure R is installed with: R -e \"install.packages('sentimentr')\""
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load R sentimentr package: {e}\n"
+                "Ensure R is installed and sentimentr package is available:\n"
+                "  R -e \"install.packages('sentimentr')\""
+            )
+
+    def _analyze_text(self, text: str) -> tuple[float, float]:
+        """Analyze text with sentimentr, returning (sentiment, confidence)."""
+        if not text or not text.strip():
+            return 0.0, 0.0
+
+        text_r = self._rvectors.StrVector([text])
+        result = self._sentimentr.sentiment_by(text_r)
+
+        ave_sentiment = float(result.rx2('ave_sentiment')[0])
+        sd_val = float(result.rx2('sd')[0])
+        if self._ro.r['is.na'](result.rx2('sd')[0])[0]:
+            sd_val = 0.0
+
+        sentiment_score = ave_sentiment * self.scale_max
+        confidence = float(1.0 / (1.0 + sd_val))
+
+        return sentiment_score, confidence
+
+    def analyze_batch(self, articles: List[Dict], show_progress: bool = True):
+        """Analyze batch of articles."""
+        results = []
+
+        iterator = articles
+        if show_progress:
+            iterator = tqdm(articles, desc=f"Analyzing with {self.model_type}")
+
+        for article in iterator:
+            start_time = time.time()
+
+            headline_sentiment, headline_conf = self._analyze_text(article['title'])
+            overall_sentiment, overall_conf = self._analyze_text(
+                f"{article['title']}\n\n{article['content'][:8000]}"
+            )
+
+            processing_time = int((time.time() - start_time) * 1000)
+
+            results.append(SentimentResult(
+                article_id=str(article['id']),
+                model_type=self.model_type,
+                model_name=self.model_name,
+                overall_sentiment=overall_sentiment,
+                overall_confidence=overall_conf,
+                headline_sentiment=headline_sentiment,
+                headline_confidence=headline_conf,
+                processing_time_ms=processing_time
+            ))
+
+        return results
+
+
 def get_sentiment_analyzer(model_type: str, config: dict = None) -> SentimentAnalyzer:
     """Factory function to get sentiment analyzer by type.
 
     Args:
-        model_type: One of 'roberta', 'distilbert', 'finbert', 'vader', 'textblob'
+        model_type: One of 'roberta', 'distilbert', 'finbert', 'vader', 'textblob', 'sentimentr'
         config: Optional config dict
 
     Returns:
@@ -527,7 +623,8 @@ def get_sentiment_analyzer(model_type: str, config: dict = None) -> SentimentAna
         'distilbert': DistilBERTSentimentAnalyzer,
         'finbert': FinBERTSentimentAnalyzer,
         'vader': VADERSentimentAnalyzer,
-        'textblob': TextBlobSentimentAnalyzer
+        'textblob': TextBlobSentimentAnalyzer,
+        'sentimentr': SentimentRAnalyzer,
     }
 
     if model_type not in analyzers:

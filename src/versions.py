@@ -93,6 +93,79 @@ def get_default_topic_config() -> Dict[str, Any]:
     }
 
 
+def get_default_lda_config() -> Dict[str, Any]:
+    """
+    Get default configuration for LDA topic analysis.
+
+    Returns:
+        Dictionary with configuration for LDA topic modeling.
+    """
+    return {
+        "topics": {
+            "method": "lda",
+            "nr_topics": 20,
+            "stop_words": ["sri", "lanka", "lankan"],
+            "lda": {
+                "max_iter": 25,
+                "learning_method": "online",
+                "min_df": 5,
+                "max_df": 0.95,
+                "max_features": 10000,
+                "ngram_range": [1, 2],
+                "doc_topic_prior": None,
+                "topic_word_prior": None,
+            },
+        }
+    }
+
+
+def get_default_sbm_config() -> Dict[str, Any]:
+    """
+    Get default configuration for SBM (Spectral Co-clustering) topic analysis.
+
+    Returns:
+        Dictionary with configuration for SBM topic modeling.
+    """
+    return {
+        "topics": {
+            "method": "sbm",
+            "nr_topics": 20,
+            "stop_words": ["sri", "lanka", "lankan"],
+            "sbm": {
+                "min_df": 5,
+                "max_df": 0.95,
+                "max_features": 8000,
+                "mini_batch": False,
+                "n_svd_vecs": None,
+            },
+        }
+    }
+
+
+def get_default_glove_config() -> Dict[str, Any]:
+    """
+    Get default configuration for GloVe topic analysis.
+
+    Returns:
+        Dictionary with configuration for GloVe + k-means topic modeling.
+    """
+    return {
+        "topics": {
+            "method": "glove",
+            "nr_topics": 20,
+            "stop_words": ["sri", "lanka", "lankan"],
+            "glove": {
+                "pretrained_model": "glove-wiki-gigaword-100",
+                "min_df": 3,
+                "max_df": 0.95,
+                "kmeans_n_init": 10,
+                "kmeans_max_iter": 300,
+                "top_n_label_words": 20,
+            },
+        }
+    }
+
+
 def get_default_clustering_config() -> Dict[str, Any]:
     """
     Get default configuration for clustering analysis.

@@ -16,6 +16,7 @@ bertopic>=0.16.0
 sentence-transformers>=2.2.2
 umap-learn>=0.5.5
 hdbscan>=0.8.33
+gensim>=4.3.2  # GloVe pre-trained word vectors for GloVe topic modeling (4.3.2+ required for scipy>=1.11 compat)
 
 # NLP
 nltk>=3.8.1
