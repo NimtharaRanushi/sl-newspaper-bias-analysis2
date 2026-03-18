@@ -122,6 +122,27 @@ def load_sentiment_distribution(model_type: str):
 
 
 @st.cache_data(ttl=300)
+def load_sentiment_density(model_type: str):
+    """Load raw sentiment scores per source for density/KDE plots."""
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT
+                    n.source_id,
+                    sa.overall_sentiment,
+                    sa.headline_sentiment
+                FROM {schema}.sentiment_analyses sa
+                JOIN {schema}.news_articles n ON sa.article_id = n.id
+                WHERE sa.model_type = %s
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22'
+                  AND n.date_posted <= '2025-12-31'
+            """, (model_type,))
+            return cur.fetchall()
+
+
+@st.cache_data(ttl=300)
 def load_sentiment_percentage_by_source(model_type: str):
     """Load sentiment percentage distribution by source."""
     with get_db() as db:
@@ -202,6 +223,115 @@ def load_topic_sentiment(model_type: str, version_id=None):
 
 
 @st.cache_data(ttl=300)
+def load_event_polarity(version_id, model_type: str):
+    """Load per-source average sentiment for each multi-source event cluster.
+
+    Returns rows with: cluster_id, cluster_name, date_start, date_end,
+    source_id, avg_sentiment, stddev_sentiment, article_count.
+    Only includes clusters covered by more than one source.
+    """
+    if not version_id:
+        return []
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT
+                    ec.id              AS cluster_id,
+                    ec.cluster_name,
+                    ec.date_start,
+                    ec.date_end,
+                    n.source_id,
+                    AVG(sa.overall_sentiment)    AS avg_sentiment,
+                    STDDEV(sa.overall_sentiment) AS stddev_sentiment,
+                    COUNT(*)                     AS article_count
+                FROM {schema}.event_clusters ec
+                JOIN {schema}.article_clusters ac ON ec.id = ac.cluster_id
+                JOIN {schema}.news_articles n     ON ac.article_id = n.id
+                JOIN {schema}.sentiment_analyses sa ON n.id = sa.article_id
+                WHERE ec.result_version_id = %s
+                  AND sa.model_type = %s
+                  AND ec.sources_count > 1
+                GROUP BY ec.id, ec.cluster_name, ec.date_start, ec.date_end, n.source_id
+                ORDER BY ec.id, n.source_id
+            """, (version_id, model_type))
+            return cur.fetchall()
+
+
+@st.cache_data(ttl=300)
+def load_event_articles_with_sentiment(cluster_id, model_type: str):
+    """Load individual articles for an event cluster with their sentiment scores."""
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT
+                    n.title,
+                    n.source_id,
+                    n.date_posted,
+                    n.url,
+                    sa.overall_sentiment
+                FROM {schema}.article_clusters ac
+                JOIN {schema}.news_articles n     ON ac.article_id = n.id
+                JOIN {schema}.sentiment_analyses sa ON n.id = sa.article_id
+                WHERE ac.cluster_id = %s
+                  AND sa.model_type = %s
+                ORDER BY n.source_id, n.date_posted
+            """, (cluster_id, model_type))
+            return cur.fetchall()
+
+
+@st.cache_data(ttl=300)
+def load_weighted_topic_sentiment(model_type: str, version_id: str):
+    """Load gamma-weighted topic sentiment scores.
+
+    Uses topic_confidence (gamma) from article_analysis as a weighting factor.
+    Documents with higher topic confidence contribute proportionally more to the
+    topic's sentiment polarity, following the methodology in:
+    "The Media Bias Detector" (UPenn, 2025).
+
+    Returns per-topic: weighted_overall, weighted_headline, avg_overall,
+    avg_headline, stddev_overall, n_articles.
+    """
+    with get_db() as db:
+        schema = db.config["schema"]
+        with db.cursor() as cur:
+            cur.execute(f"""
+                SELECT
+                    t.topic_id,
+                    t.name AS topic_name,
+                    -- Gamma-weighted sentiment (normalised by sum of gammas)
+                    SUM(sa.overall_sentiment  * aa.topic_confidence)
+                        / NULLIF(SUM(aa.topic_confidence), 0) AS weighted_overall,
+                    SUM(sa.headline_sentiment * aa.topic_confidence)
+                        / NULLIF(SUM(aa.topic_confidence), 0) AS weighted_headline,
+                    -- Unweighted averages for comparison
+                    AVG(sa.overall_sentiment)   AS avg_overall,
+                    AVG(sa.headline_sentiment)  AS avg_headline,
+                    STDDEV(sa.overall_sentiment) AS stddev_overall,
+                    MIN(sa.overall_sentiment)   AS min_sentiment,
+                    MAX(sa.overall_sentiment)   AS max_sentiment,
+                    COUNT(*)                    AS n_articles
+                FROM {schema}.sentiment_analyses sa
+                JOIN {schema}.news_articles n
+                    ON sa.article_id = n.id
+                JOIN {schema}.article_analysis aa
+                    ON sa.article_id = aa.article_id
+                   AND aa.result_version_id = %s
+                JOIN {schema}.topics t
+                    ON aa.primary_topic_id = t.id
+                   AND t.result_version_id = %s
+                WHERE sa.model_type = %s
+                  AND t.topic_id NOT IN (-1, -2)
+                  AND n.is_ditwah_cyclone = 1
+                  AND n.date_posted >= '2025-11-22' AND n.date_posted <= '2025-12-31'
+                GROUP BY t.topic_id, t.name
+                HAVING COUNT(*) >= 3
+                ORDER BY weighted_overall
+            """, (version_id, version_id, model_type))
+            return cur.fetchall()
+
+
 def load_available_models():
     """Get list of models with analysis results."""
     with get_db() as db:

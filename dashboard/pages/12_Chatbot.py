@@ -459,7 +459,85 @@ def compute_stance_by_source(claim_text: str, articles: list, nli_analyzer) -> l
     return sorted(rows, key=lambda r: r["agree_pct"], reverse=True)
 
 
-def render_stance_chart(stance_rows: list):
+def compute_stance_by_source_llm(claim_text: str, articles: list, llm) -> list:
+    """Run LLM-based stance detection for one claim against all retrieved articles.
+
+    Makes one API call per article and returns per-source stance rows in the same
+    format as compute_stance_by_source() so render_stance_chart() is reused.
+    """
+    from collections import defaultdict
+
+    system_prompt = (
+        "You are a media bias analyst specialising in Sri Lankan newspapers. "
+        "Assess how a given article frames or responds to a specific claim. "
+        "Be objective and base your judgment strictly on the article's content and framing."
+    )
+
+    source_scores = defaultdict(list)
+    progress = st.progress(0, text="Running LLM stance analysis…")
+
+    for i, art in enumerate(articles):
+        title   = (art.get("title")   or "").strip()
+        content = (art.get("content") or "").strip()[:700]
+        prompt = (
+            f'CLAIM:\n"{claim_text}"\n\n'
+            f"ARTICLE:\n"
+            f"Title: {title}\n"
+            f"Content:\n{content}\n\n"
+            f"TASK:\n"
+            f"Determine the article's stance toward the claim.\n\n"
+            f"STANCE LABELS:\n"
+            f"- agree:\n"
+            f"  The article clearly supports, reinforces, or positively frames the claim.\n"
+            f"  Responsibility or validity of the claim is affirmed.\n\n"
+            f"- neutral:\n"
+            f"  The article reports facts, provides context, or presents multiple viewpoints\n"
+            f"  without clearly endorsing or rejecting the claim.\n\n"
+            f"- disagree:\n"
+            f"  The article challenges, contradicts, downplays, or shifts blame away from the claim.\n"
+            f"  The claim is questioned, rejected, or framed as inaccurate or unfair.\n\n"
+            f"OUTPUT FORMAT:\n"
+            f"Stance: [agree / neutral / disagree]\n"
+            f"Score: A value between -1.0 and +1.0\n"
+            f"Justification: One or two sentences explaining the reasoning, "
+            f"citing specific language or framing from the article."
+        )
+        try:
+            response = llm.generate(prompt, system_prompt=system_prompt)
+            raw = response.content.strip()
+            score = 0.0
+            for line in raw.splitlines():
+                if line.lower().startswith("score:"):
+                    score = max(-1.0, min(1.0, float(line.split(":", 1)[1].strip())))
+                    break
+        except Exception:
+            score = 0.0
+
+        source_scores[art["source_id"]].append(score)
+        progress.progress((i + 1) / len(articles), text=f"Article {i + 1}/{len(articles)}…")
+
+    progress.empty()
+
+    rows = []
+    for source_id, scores in source_scores.items():
+        total          = len(scores)
+        agree_count    = sum(1 for s in scores if s >  0.2)
+        neutral_count  = sum(1 for s in scores if -0.2 <= s <= 0.2)
+        disagree_count = sum(1 for s in scores if s < -0.2)
+        rows.append({
+            "source_id":      source_id,
+            "total":          total,
+            "agree_count":    agree_count,
+            "agree_pct":      agree_count    * 100.0 / total,
+            "neutral_count":  neutral_count,
+            "neutral_pct":    neutral_count  * 100.0 / total,
+            "disagree_count": disagree_count,
+            "disagree_pct":   disagree_count * 100.0 / total,
+        })
+    return sorted(rows, key=lambda r: r["agree_pct"], reverse=True)
+
+
+def render_stance_chart(stance_rows: list, chart_key: str = "stance_distribution_chart"):
     """
     Render a vertical stacked bar chart of stance by source (agree / neutral / disagree).
     Returns a stance DataFrame for use in interpretation, or None if no data.
@@ -479,6 +557,7 @@ def render_stance_chart(stance_rows: list):
     ]
 
     for pct_col, count_col, label, color in stance_categories:
+        customdata = stance_df[count_col].tolist()
         fig.add_trace(go.Bar(
             name=label,
             x=stance_df["source_name"],
@@ -487,11 +566,11 @@ def render_stance_chart(stance_rows: list):
             text=stance_df[pct_col].apply(lambda v: f"{v:.1f}%" if v >= 5 else ""),
             textposition="inside",
             textfont=dict(size=11, color="white" if label != "Neutral" else "black"),
+            customdata=customdata,
             hovertemplate=(
                 "<b>%{x}</b><br>"
-                + label + ": %{y:.1f}%<br>"
-                + "Count: " + stance_df[count_col].astype(str)
-                + "<extra></extra>"
+                + f"{label}: %{{y:.1f}}%<br>"
+                + "Count: %{customdata}<extra></extra>"
             ),
         ))
 
@@ -512,7 +591,7 @@ def render_stance_chart(stance_rows: list):
             x=1,
         ),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
     most_supportive = stance_df.loc[stance_df["agree_pct"].idxmax()]
     most_critical   = stance_df.loc[stance_df["disagree_pct"].idxmax()]
@@ -680,16 +759,31 @@ if "chatbot_question" in st.session_state:
         )
         st.info(f"**Hypothesis:** {hypothesis}")
 
-        stance_cache = st.session_state.setdefault("chatbot_stance_cache", {})
-        cache_key = f"__hypothesis__{hypothesis}"
-        if cache_key not in stance_cache:
-            with st.spinner("Running NLI stance analysis on hypothesis…"):
-                nli_analyzer = load_nli_analyzer()
-                stance_cache[cache_key] = compute_stance_by_source(
-                    hypothesis, stored_articles, nli_analyzer
-                )
+        hyp_method = st.radio(
+            "Stance analysis method",
+            options=["NLI", "LLM"],
+            index=0,
+            horizontal=True,
+            key="hyp_stance_method",
+            help="NLI: roberta-large-mnli (fast, local). LLM: uses configured LLM (slower, more nuanced).",
+        )
 
-        q_stance_df = render_stance_chart(stance_cache[cache_key])
+        stance_cache = st.session_state.setdefault("chatbot_stance_cache", {})
+        cache_key = f"hyp__{hyp_method}__{hypothesis}"
+        if cache_key not in stance_cache:
+            with st.spinner(f"Running {hyp_method} stance analysis on hypothesis…"):
+                if hyp_method == "NLI":
+                    nli_analyzer = load_nli_analyzer()
+                    stance_cache[cache_key] = compute_stance_by_source(hypothesis, stored_articles, nli_analyzer)
+                else:
+                    llm_client = load_llm()
+                    stance_cache[cache_key] = compute_stance_by_source_llm(hypothesis, stored_articles, llm_client)
+            st.session_state["chatbot_stance_cache"] = stance_cache
+
+        q_stance_df = render_stance_chart(
+            stance_cache[cache_key],
+            chart_key=f"stance_distribution_chart_query_{hyp_method.lower()}",
+        )
 
         if q_stance_df is not None:
             st.markdown("---")
@@ -721,22 +815,41 @@ if "chatbot_question" in st.session_state:
         st.info(f"**Claim:** {selected_claim_text}")
 
         st.subheader("⚖️ Stance Distribution: Do sources agree or disagree with this claim?")
+
+        claims_method = st.radio(
+            "Stance analysis method",
+            options=["NLI", "LLM"],
+            index=0,
+            horizontal=True,
+            key="claims_stance_method",
+            help="NLI: roberta-large-mnli (fast, local). LLM: uses configured LLM (slower, more nuanced).",
+        )
+
         st.caption(
-            "NLI (roberta-large-mnli) scores each retrieved article against this claim. "
+            f"{'NLI (roberta-large-mnli)' if claims_method == 'NLI' else 'LLM'} scores each retrieved article against this claim. "
             "Shows whether each newspaper source agrees, stays neutral, or disagrees."
         )
 
-        # Cache NLI results per claim to avoid recomputing on every widget rerun
+        # Cache results per (method, claim) to avoid recomputing on every widget rerun
         stance_cache = st.session_state.setdefault("chatbot_stance_cache", {})
-        if selected_claim_text not in stance_cache:
-            with st.spinner("Running NLI stance analysis…"):
-                nli_analyzer = load_nli_analyzer()
-                stance_cache[selected_claim_text] = compute_stance_by_source(
-                    selected_claim_text, stored_articles, nli_analyzer
-                )
+        claim_cache_key = f"claim__{claims_method}__{selected_claim_text}"
+        if claim_cache_key not in stance_cache:
+            with st.spinner(f"Running {claims_method} stance analysis…"):
+                if claims_method == "NLI":
+                    nli_analyzer = load_nli_analyzer()
+                    stance_cache[claim_cache_key] = compute_stance_by_source(selected_claim_text, stored_articles, nli_analyzer)
+                else:
+                    llm_client = load_llm()
+                    stance_cache[claim_cache_key] = compute_stance_by_source_llm(selected_claim_text, stored_articles, llm_client)
+            # Explicitly persist mutation so Streamlit tracks the update
+            st.session_state["chatbot_stance_cache"] = stance_cache
 
-        stance_rows = stance_cache[selected_claim_text]
-        stance_df = render_stance_chart(stance_rows)
+        stance_rows = stance_cache[claim_cache_key]
+
+        # Use a unique chart key per (method, claim) so Streamlit re-renders on changes
+        import hashlib as _hashlib
+        _claim_hash = _hashlib.md5(selected_claim_text.encode()).hexdigest()[:8]
+        stance_df = render_stance_chart(stance_rows, chart_key=f"stance_distribution_chart_claim_{claims_method.lower()}_{_claim_hash}")
 
         if stance_df is not None:
             st.markdown("---")

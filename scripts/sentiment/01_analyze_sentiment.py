@@ -150,7 +150,7 @@ def main():
     parser.add_argument(
         "--models",
         nargs='+',
-        choices=['roberta', 'distilbert', 'finbert', 'vader', 'textblob'],
+        choices=['roberta', 'distilbert', 'finbert', 'vader', 'textblob', 'sentimentr'],
         help="Specific models to run (default: all enabled models)"
     )
 
