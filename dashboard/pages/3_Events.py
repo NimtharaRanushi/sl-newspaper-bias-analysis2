@@ -18,13 +18,6 @@ from components.version_selector import render_version_selector, render_create_v
 from components.styling import apply_page_style
 from src.clustering import compute_clusters_from_edges
 
-st.set_page_config(
-    page_title="Sri Lanka Media Bias Detector",
-    page_icon="",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 apply_page_style()
 
 st.title("Event Clustering Analysis")

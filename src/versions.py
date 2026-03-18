@@ -407,6 +407,22 @@ def get_default_entity_stance_config() -> Dict[str, Any]:
     }
 
 
+def get_default_quote_extraction_config() -> Dict[str, Any]:
+    """
+    Get default configuration for quote extraction analysis.
+
+    Returns:
+        Dictionary with configuration for quote extraction only.
+    """
+    return {
+        "quote_extraction": {
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+            "temperature": 0.0
+        }
+    }
+
+
 def get_default_chunk_topic_config() -> Dict[str, Any]:
     """Get default configuration for chunk-level topic analysis.
 
@@ -468,7 +484,7 @@ def create_version(
     Raises:
         ValueError: If version name already exists for the same analysis type
     """
-    valid_types = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'multi_doc_summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'chunk_topics', 'combined']
+    valid_types = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'multi_doc_summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'chunk_topics', 'quote_extraction', 'combined']
     if analysis_type not in valid_types:
         raise ValueError(f"Invalid analysis_type: {analysis_type}. Must be one of {valid_types}")
 
@@ -703,7 +719,7 @@ def update_pipeline_status(
         step: Pipeline step name ('embeddings', 'topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', or 'ditwah_claims')
         complete: Whether the step is complete
     """
-    valid_steps = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'chunk_topics']
+    valid_steps = ['topics', 'clustering', 'word_frequency', 'ner', 'summarization', 'ditwah', 'ditwah_claims', 'entity_stance', 'chunk_topics', 'quote_extraction']
     if step not in valid_steps:
         raise ValueError(f"Invalid step: {step}. Must be one of {valid_steps}")
 
@@ -748,6 +764,8 @@ def update_pipeline_status(
                             (pipeline_status->>'entity_stance')::boolean
                         WHEN 'chunk_topics' THEN
                             (pipeline_status->>'chunk_topics')::boolean
+                        WHEN 'quote_extraction' THEN
+                            (pipeline_status->>'quote_extraction')::boolean
                         WHEN 'combined' THEN
                             (pipeline_status->>'embeddings')::boolean AND
                             (pipeline_status->>'topics')::boolean AND

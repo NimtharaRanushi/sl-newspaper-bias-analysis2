@@ -20,12 +20,6 @@ from src.llm import get_llm, EmbeddingClient
 # Page config
 # ============================================================================
 
-st.set_page_config(
-    page_title="Ditwah Chatbot - Sri Lanka Media Bias Detector",
-    page_icon="💬",
-    layout="wide",
-)
-
 apply_page_style()
 
 # ============================================================================

@@ -46,6 +46,13 @@ class BaseLLM(ABC):
         response = self.generate(prompt, system_prompt, json_mode=True)
         return json.loads(response.content)
 
+    def generate_structured(self, prompt: str, response_model, system_prompt: Optional[str] = None):
+        """Generate structured output validated against a Pydantic model.
+        Default: generate_json() + Pydantic parse. Override for native support.
+        """
+        raw = self.generate_json(prompt, system_prompt)
+        return response_model.model_validate(raw)
+
 
 class ClaudeLLM(BaseLLM):
     """Anthropic Claude client."""
@@ -147,6 +154,21 @@ class OpenAILLM(BaseLLM):
             model=self.model,
             provider="openai"
         )
+
+    def generate_structured(self, prompt: str, response_model, system_prompt: Optional[str] = None):
+        """Use OpenAI native structured outputs via beta.chat.completions.parse."""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        completion = self.client.beta.chat.completions.parse(
+            model=self.model,
+            messages=messages,
+            response_format=response_model,
+            temperature=self.temperature,
+        )
+        return completion.choices[0].message.parsed
 
 
 class MistralLLM(BaseLLM):

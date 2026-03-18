@@ -18,11 +18,6 @@ from components.source_mapping import SOURCE_NAMES
 from components.version_selector import render_version_selector, render_create_version_button
 from components.styling import apply_page_style
 
-st.set_page_config(
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 apply_page_style()
 
 st.title("Chunk-Level Topic Analysis")

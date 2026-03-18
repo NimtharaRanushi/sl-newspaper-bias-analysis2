@@ -12,6 +12,7 @@ from src.db._entity_stance import EntityStanceMixin
 from src.db._word_frequency import WordFrequencyMixin
 from src.db._summaries import SummaryMixin
 from src.db._chunk_topics import ChunkTopicMixin
+from src.db._quotes import QuotesMixin
 
 
 class Database(
@@ -25,6 +26,7 @@ class Database(
     WordFrequencyMixin,
     SummaryMixin,
     ChunkTopicMixin,
+    QuotesMixin,
     DatabaseConnection,
 ):
     """PostgreSQL database connection manager."""
