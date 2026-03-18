@@ -1572,24 +1572,30 @@ def load_stance_polarization_matrix(version_id, category_filter=None):
     with get_db() as db:
         schema = db.config["schema"]
         with db.cursor() as cur:
-            category_clause = "AND dc.category = %s" if category_filter else ""
+            category_clause = "AND dc.claim_category = %s" if category_filter else ""
             params = [version_id, category_filter] if category_filter else [version_id]
 
             cur.execute(f"""
+                WITH claim_controversy AS (
+                    SELECT claim_id, STDDEV(stance_score) as controversy_index
+                    FROM {schema}.claim_stance
+                    GROUP BY claim_id
+                )
                 SELECT
                     dc.id as claim_id,
                     dc.claim_text,
-                    dc.category,
+                    dc.claim_category,
                     cs.source_id,
                     AVG(cs.stance_score) as avg_stance,
                     AVG(cs.confidence) as avg_confidence,
-                    STDDEV(cs.stance_score) OVER (PARTITION BY dc.id) as controversy_index,
+                    cc.controversy_index,
                     COUNT(cs.id) as article_count
                 FROM {schema}.claim_stance cs
                 JOIN {schema}.ditwah_claims dc ON cs.claim_id = dc.id
+                JOIN claim_controversy cc ON cc.claim_id = dc.id
                 WHERE dc.result_version_id = %s {category_clause}
-                GROUP BY dc.id, dc.claim_text, dc.category, cs.source_id
-                ORDER BY controversy_index DESC, dc.claim_text, cs.source_id
+                GROUP BY dc.id, dc.claim_text, dc.claim_category, cs.source_id, cc.controversy_index
+                ORDER BY cc.controversy_index DESC, dc.claim_text, cs.source_id
             """, params)
 
             rows = cur.fetchall()
