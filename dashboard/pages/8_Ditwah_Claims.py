@@ -24,13 +24,6 @@ from src.db import get_db
 from src.llm import get_embeddings_client
 from src.config import load_config
 
-# Page config
-st.set_page_config(
-    page_title="Ditwah Claims - Sri Lanka Media Bias Detector",
-    page_icon="🌀",
-    layout="wide"
-)
-
 apply_page_style()
 
 

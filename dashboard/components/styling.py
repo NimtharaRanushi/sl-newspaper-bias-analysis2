@@ -8,6 +8,11 @@ SIDEBAR_CSS = """
         min-width: 180px;
         max-width: 180px;
     }
+
+    /* Align section headers with nav link items */
+    [data-testid="stSidebarNavSectionHeader"] p {
+        padding-left: 0.75rem;
+    }
 </style>
 """
 

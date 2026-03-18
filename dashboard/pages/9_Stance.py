@@ -16,13 +16,6 @@ from components.version_selector import render_version_selector, render_create_v
 from components.styling import apply_page_style
 from src.db import get_db
 
-# Page config
-st.set_page_config(
-    page_title="Stance Analysis - Sri Lanka Media Bias Detector",
-    page_icon="⚖️",
-    layout="wide"
-)
-
 apply_page_style()
 
 
