@@ -1,4 +1,4 @@
-"""Ditwah Cyclone Chatbot — RAG-powered Q&A with claim stance analysis."""
+"""Ditwah Cyclone Chatbot — RAG-powered Q&A."""
 
 import sys
 from pathlib import Path
@@ -7,12 +7,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import math
 import streamlit as st
-import plotly.graph_objects as go
-import pandas as pd
 
 from components.source_mapping import SOURCE_NAMES, SOURCE_COLORS
 from components.styling import apply_page_style
-from components.interpretations import generate_stance_interpretation
 from src.db import get_db
 from src.llm import get_llm, EmbeddingClient
 
@@ -42,12 +39,6 @@ def load_llm():
     return get_llm()
 
 
-@st.cache_resource(show_spinner="Loading NLI stance model...")
-def load_nli_analyzer():
-    from src.nli_stance import NLIStanceAnalyzer
-    return NLIStanceAnalyzer()
-
-
 # ============================================================================
 # Data loaders
 # ============================================================================
@@ -64,27 +55,6 @@ def get_available_embedding_models() -> list:
                 WHERE n.is_ditwah_cyclone = 1
                 GROUP BY e.embedding_model
                 ORDER BY article_count DESC
-            """)
-            return cur.fetchall()
-
-
-@st.cache_data(ttl=600)
-def get_claims_versions_with_stance() -> list:
-    """Return ditwah_claims versions that have both sentiment and stance data."""
-    with get_db() as db:
-        schema = db.config["schema"]
-        with db.cursor() as cur:
-            cur.execute(f"""
-                SELECT rv.id, rv.name, rv.created_at,
-                       COUNT(DISTINCT dc.id)              AS claims_count,
-                       COUNT(DISTINCT cs_sent.article_id) AS covered_articles,
-                       COUNT(DISTINCT cst.id)             AS stance_rows
-                FROM {schema}.result_versions rv
-                JOIN {schema}.ditwah_claims  dc     ON dc.result_version_id = rv.id
-                JOIN {schema}.claim_sentiment cs_sent ON cs_sent.claim_id   = dc.id
-                JOIN {schema}.claim_stance    cst     ON cst.claim_id       = dc.id
-                GROUP BY rv.id, rv.name, rv.created_at
-                ORDER BY stance_rows DESC
             """)
             return cur.fetchall()
 
@@ -129,164 +99,6 @@ def search_ditwah_articles(question_embedding: list, embedding_model: str, min_s
             return cur.fetchall()
 
 
-@st.cache_data(ttl=300)
-def load_claims_for_articles(article_ids: tuple, claims_version_id: str, stance_model: str = None) -> list:
-    """
-    Find the general claims linked to the retrieved articles.
-
-    Primary path: news_articles → ditwah_article_claims (general_claim_id) → ditwah_claims.
-    Each article is assigned to exactly one general claim via the two-step pipeline.
-    Only returns claims that have at least 20 total articles and have stance data.
-    Falls back to claim_sentiment if no results from the primary path.
-
-    stance_model: if provided, only returns claims that have stance data for that specific model.
-    """
-    if not article_ids:
-        return []
-
-    def model_exists_clause(schema, model):
-        if model:
-            return f"EXISTS (SELECT 1 FROM {schema}.claim_stance cst WHERE cst.claim_id = dc.id AND cst.llm_model = %s)"
-        return f"EXISTS (SELECT 1 FROM {schema}.claim_stance cst WHERE cst.claim_id = dc.id)"
-
-    with get_db() as db:
-        schema = db.config["schema"]
-        exists_clause = model_exists_clause(schema, stance_model)
-
-        with db.cursor() as cur:
-            # Primary: use direct article→claim assignment (general_claim_id)
-            params = [list(article_ids), claims_version_id]
-            if stance_model:
-                params.append(stance_model)
-            cur.execute(
-                f"""
-                SELECT
-                    dc.id,
-                    dc.claim_text,
-                    dc.claim_category,
-                    dc.article_count,
-                    COUNT(DISTINCT dac.article_id) AS matched_articles
-                FROM {schema}.ditwah_article_claims dac
-                JOIN {schema}.ditwah_claims dc ON dac.general_claim_id = dc.id
-                WHERE dac.article_id = ANY(%s::uuid[])
-                  AND dc.result_version_id = %s
-                  AND {exists_clause}
-                GROUP BY dc.id, dc.claim_text, dc.claim_category, dc.article_count
-                ORDER BY matched_articles DESC, dc.article_count DESC
-                """,
-                params,
-            )
-            rows = cur.fetchall()
-
-        if rows:
-            return rows
-
-        # Fallback: use claim_sentiment (older data without general_claim_id)
-        with db.cursor() as cur:
-            params = [list(article_ids), claims_version_id]
-            if stance_model:
-                params.append(stance_model)
-            cur.execute(
-                f"""
-                SELECT
-                    dc.id,
-                    dc.claim_text,
-                    dc.claim_category,
-                    dc.article_count,
-                    COUNT(DISTINCT cs_sent.article_id) AS matched_articles
-                FROM {schema}.claim_sentiment cs_sent
-                JOIN {schema}.ditwah_claims dc ON cs_sent.claim_id = dc.id
-                WHERE cs_sent.article_id = ANY(%s::uuid[])
-                  AND dc.result_version_id = %s
-                  AND {exists_clause}
-                GROUP BY dc.id, dc.claim_text, dc.claim_category, dc.article_count
-                ORDER BY matched_articles DESC, dc.article_count DESC
-                """,
-                params,
-            )
-            return cur.fetchall()
-
-
-@st.cache_data(ttl=600)
-def get_available_stance_models() -> list:
-    """Return distinct llm_model values stored in claim_stance, sorted alphabetically."""
-    with get_db() as db:
-        schema = db.config["schema"]
-        with db.cursor() as cur:
-            cur.execute(f"""
-                SELECT DISTINCT llm_model
-                FROM {schema}.claim_stance
-                WHERE llm_model IS NOT NULL
-                ORDER BY llm_model
-            """)
-            rows = cur.fetchall()
-            return [r["llm_model"] for r in rows]
-
-
-@st.cache_data(ttl=300)
-def load_stance_by_source(
-    claim_id: str,
-    stance_model: str = None,
-    article_ids: tuple = None,
-) -> list:
-    """
-    Stance breakdown (Agree / Neutral / Disagree %) per source for one claim.
-
-    Uses stance_score threshold: >0.2 = agree, <-0.2 = disagree, else neutral.
-    Optionally filter by article_ids (tuple of UUID strings) and/or stance_model.
-    """
-    with get_db() as db:
-        schema = db.config["schema"]
-        with db.cursor() as cur:
-            article_clause = "AND article_id = ANY(%s::uuid[])" if article_ids else ""
-            model_clause = "AND llm_model = %s" if stance_model else ""
-            params = [claim_id]
-            if article_ids:
-                params.append(list(article_ids))
-            if stance_model:
-                params.append(stance_model)
-            cur.execute(
-                f"""
-                SELECT
-                    source_id,
-                    COUNT(*)                                                             AS total,
-                    SUM(CASE WHEN stance_score >  0.2 THEN 1 ELSE 0 END)::int          AS agree_count,
-                    SUM(CASE WHEN stance_score >  0.2 THEN 1 ELSE 0 END) * 100.0
-                        / COUNT(*)                                                       AS agree_pct,
-                    SUM(CASE WHEN stance_score BETWEEN -0.2 AND 0.2 THEN 1 ELSE 0 END)::int
-                                                                                         AS neutral_count,
-                    SUM(CASE WHEN stance_score BETWEEN -0.2 AND 0.2 THEN 1 ELSE 0 END) * 100.0
-                        / COUNT(*)                                                       AS neutral_pct,
-                    SUM(CASE WHEN stance_score < -0.2 THEN 1 ELSE 0 END)::int          AS disagree_count,
-                    SUM(CASE WHEN stance_score < -0.2 THEN 1 ELSE 0 END) * 100.0
-                        / COUNT(*)                                                       AS disagree_pct
-                FROM {schema}.claim_stance
-                WHERE claim_id = %s {article_clause} {model_clause}
-                GROUP BY source_id
-                ORDER BY agree_pct DESC
-                """,
-                params,
-            )
-            return cur.fetchall()
-
-
-def _stance_rows_to_df(stance_rows: list) -> pd.DataFrame:
-    """Convert raw stance DB rows to a DataFrame with source_name and count columns."""
-    records = []
-    for row in stance_rows:
-        records.append({
-            "source_name":    SOURCE_NAMES.get(row["source_id"], str(row["source_id"])),
-            "total":          int(row["total"]),
-            "agree_pct":      float(row["agree_pct"]),
-            "neutral_pct":    float(row["neutral_pct"]),
-            "disagree_pct":   float(row["disagree_pct"]),
-            "agree_count":    int(row["agree_count"]),
-            "neutral_count":  int(row["neutral_count"]),
-            "disagree_count": int(row["disagree_count"]),
-        })
-    return pd.DataFrame(records)
-
-
 def generate_answer(question: str, articles: list, llm) -> str:
     """LLM generates a grounded answer from the top-10 retrieved article excerpts."""
     context_parts = []
@@ -314,293 +126,6 @@ def generate_answer(question: str, articles: list, llm) -> str:
     return llm.generate(prompt, system_prompt=system_prompt).content.strip()
 
 
-def generate_hypothesis(question: str, llm) -> str:
-    """Convert a user question into a declarative hypothesis for NLI stance analysis.
-
-    e.g. "Did the government take proper actions?" →
-         "The government took proper actions towards the disaster."
-    """
-    system_prompt = (
-        "You are a media bias analyst. Convert a user's question into a single, "
-        "clear declarative statement (hypothesis) that can be used to measure "
-        "whether different media outlets agree or disagree with it."
-    )
-    prompt = (
-        f"Convert this question into a concise declarative hypothesis statement "
-        f"suitable for media bias analysis. The hypothesis should be a positive "
-        f"assertion — do not use negations or hedging language.\n\n"
-        f"Question: {question}\n\n"
-        f"Return ONLY the hypothesis statement, nothing else."
-    )
-    response = llm.generate(prompt, system_prompt=system_prompt)
-    return response.content.strip().strip('"').strip("'")
-
-
-def generate_claims_from_articles(question: str, articles: list, llm) -> list:
-    """Use LLM to extract 3-5 bias-revealing claims from the retrieved articles.
-
-    Claims are tightly scoped to the reader's question and framed to expose
-    how different media outlets cover and frame the same specific topic.
-    """
-    import json as _json
-
-    context_parts = []
-    for i, art in enumerate(articles, 1):
-        source_name = SOURCE_NAMES.get(art["source_id"], art["source_id"])
-        snippet = (art["content"] or "").strip()[:900]
-        context_parts.append(
-            f"[Article {i} — {source_name}]\n"
-            f"Title: {art['title']}\n"
-            f"Content: {snippet}"
-        )
-    context = "\n\n---\n\n".join(context_parts)
-
-    system_prompt = (
-        "You are a senior media bias analyst studying how different Sri Lankan "
-        "newspapers cover Cyclone Ditwah. You extract precise, question-focused "
-        "claims from news articles to measure how different outlets agree, stay "
-        "neutral, or push back on the same assertion — revealing editorial bias."
-    )
-    prompt = (
-        f"READER'S QUESTION: \"{question}\"\n\n"
-        f"NEWSPAPER ARTICLES:\n{context}\n\n"
-        f"═══ INSTRUCTIONS ═══\n\n"
-        f"Your goal is to generate 3–5 claims for MEDIA BIAS ANALYSIS. "
-        f"Each claim will be scored by an NLI model against each article to "
-        f"reveal which outlets agree, stay neutral, or disagree — exposing "
-        f"editorial differences in coverage.\n\n"
-        f"STEP 1 — Understand the question:\n"
-        f"Identify the specific aspect the reader is asking about "
-        f"(e.g. government response, relief operations, casualties, "
-        f"infrastructure damage, international aid, economic impact).\n\n"
-        f"STEP 2 — Extract claims that satisfy ALL of the following:\n"
-        f"  ✔ ON-TOPIC: The claim must directly address the same specific "
-        f"aspect as the reader's question. Do NOT include claims about "
-        f"unrelated aspects of the cyclone.\n"
-        f"  ✔ DECLARATIVE: A confident, positive assertion — not a question, "
-        f"not hedged with 'may' or 'might', not a negation.\n"
-        f"  ✔ SPECIFIC: Contains concrete details — named actors, institutions, "
-        f"numbers, dates, locations, or specific actions.\n"
-        f"  ✔ GROUNDED: Only from what the articles explicitly report. "
-        f"Do not invent or infer facts not present in the text.\n"
-        f"  ✔ BIAS-REVEALING: Different outlets should plausibly take "
-        f"different stances on this claim — making it useful for detecting "
-        f"how media frames the story.\n\n"
-        f"GOOD example (for a question about government response):\n"
-        f'  "The government declared a national emergency within 24 hours of '
-        f'Cyclone Ditwah making landfall."\n'
-        f'  "Relief supplies reached affected districts within 48 hours of '
-        f'the disaster."\n\n'
-        f"BAD example (too vague, off-topic, or not grounded):\n"
-        f'  "The cyclone caused widespread damage."  ← too vague\n'
-        f'  "Fishermen lost their boats."  ← off-topic if question is about govt response\n\n'
-        f"Return ONLY a JSON array of claim strings — no explanation, "
-        f"no numbering, no extra text:\n"
-        f'["claim 1", "claim 2", "claim 3"]'
-    )
-
-    response = llm.generate(prompt, system_prompt=system_prompt)
-    raw = response.content.strip()
-
-    # Strip markdown code fences if present
-    if "```" in raw:
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
-    try:
-        claims = _json.loads(raw.strip())
-        if isinstance(claims, list):
-            return [str(c).strip() for c in claims if c]
-    except Exception:
-        pass
-    return []
-
-
-def compute_stance_by_source(claim_text: str, articles: list, nli_analyzer) -> list:
-    """Run NLI for one claim against all retrieved articles.
-
-    Returns per-source stance rows in the same format as load_stance_by_source()
-    so render_stance_chart() can be reused unchanged.
-    """
-    from collections import defaultdict
-
-    premises = [
-        f"{a['title']}\n{(a.get('content') or '').strip()}"
-        for a in articles
-    ]
-    results = nli_analyzer.predict_batch(premises, claim_text)
-
-    source_scores = defaultdict(list)
-    for article, result in zip(articles, results):
-        source_scores[article["source_id"]].append(result["stance_score"])
-
-    rows = []
-    for source_id, scores in source_scores.items():
-        total          = len(scores)
-        agree_count    = sum(1 for s in scores if s > 0.2)
-        neutral_count  = sum(1 for s in scores if -0.2 <= s <= 0.2)
-        disagree_count = sum(1 for s in scores if s < -0.2)
-        rows.append({
-            "source_id":      source_id,
-            "total":          total,
-            "agree_count":    agree_count,
-            "agree_pct":      agree_count    * 100.0 / total,
-            "neutral_count":  neutral_count,
-            "neutral_pct":    neutral_count  * 100.0 / total,
-            "disagree_count": disagree_count,
-            "disagree_pct":   disagree_count * 100.0 / total,
-        })
-
-    return sorted(rows, key=lambda r: r["agree_pct"], reverse=True)
-
-
-def compute_stance_by_source_llm(claim_text: str, articles: list, llm) -> list:
-    """Run LLM-based stance detection for one claim against all retrieved articles.
-
-    Makes one API call per article and returns per-source stance rows in the same
-    format as compute_stance_by_source() so render_stance_chart() is reused.
-    """
-    from collections import defaultdict
-
-    system_prompt = (
-        "You are a media bias analyst specialising in Sri Lankan newspapers. "
-        "Assess how a given article frames or responds to a specific claim. "
-        "Be objective and base your judgment strictly on the article's content and framing."
-    )
-
-    source_scores = defaultdict(list)
-    progress = st.progress(0, text="Running LLM stance analysis…")
-
-    for i, art in enumerate(articles):
-        title   = (art.get("title")   or "").strip()
-        content = (art.get("content") or "").strip()[:700]
-        prompt = (
-            f'CLAIM:\n"{claim_text}"\n\n'
-            f"ARTICLE:\n"
-            f"Title: {title}\n"
-            f"Content:\n{content}\n\n"
-            f"TASK:\n"
-            f"Determine the article's stance toward the claim.\n\n"
-            f"STANCE LABELS:\n"
-            f"- agree:\n"
-            f"  The article clearly supports, reinforces, or positively frames the claim.\n"
-            f"  Responsibility or validity of the claim is affirmed.\n\n"
-            f"- neutral:\n"
-            f"  The article reports facts, provides context, or presents multiple viewpoints\n"
-            f"  without clearly endorsing or rejecting the claim.\n\n"
-            f"- disagree:\n"
-            f"  The article challenges, contradicts, downplays, or shifts blame away from the claim.\n"
-            f"  The claim is questioned, rejected, or framed as inaccurate or unfair.\n\n"
-            f"OUTPUT FORMAT:\n"
-            f"Stance: [agree / neutral / disagree]\n"
-            f"Score: A value between -1.0 and +1.0\n"
-            f"Justification: One or two sentences explaining the reasoning, "
-            f"citing specific language or framing from the article."
-        )
-        try:
-            response = llm.generate(prompt, system_prompt=system_prompt)
-            raw = response.content.strip()
-            score = 0.0
-            for line in raw.splitlines():
-                if line.lower().startswith("score:"):
-                    score = max(-1.0, min(1.0, float(line.split(":", 1)[1].strip())))
-                    break
-        except Exception:
-            score = 0.0
-
-        source_scores[art["source_id"]].append(score)
-        progress.progress((i + 1) / len(articles), text=f"Article {i + 1}/{len(articles)}…")
-
-    progress.empty()
-
-    rows = []
-    for source_id, scores in source_scores.items():
-        total          = len(scores)
-        agree_count    = sum(1 for s in scores if s >  0.2)
-        neutral_count  = sum(1 for s in scores if -0.2 <= s <= 0.2)
-        disagree_count = sum(1 for s in scores if s < -0.2)
-        rows.append({
-            "source_id":      source_id,
-            "total":          total,
-            "agree_count":    agree_count,
-            "agree_pct":      agree_count    * 100.0 / total,
-            "neutral_count":  neutral_count,
-            "neutral_pct":    neutral_count  * 100.0 / total,
-            "disagree_count": disagree_count,
-            "disagree_pct":   disagree_count * 100.0 / total,
-        })
-    return sorted(rows, key=lambda r: r["agree_pct"], reverse=True)
-
-
-def render_stance_chart(stance_rows: list, chart_key: str = "stance_distribution_chart"):
-    """
-    Render a vertical stacked bar chart of stance by source (agree / neutral / disagree).
-    Returns a stance DataFrame for use in interpretation, or None if no data.
-    """
-    if not stance_rows:
-        st.info("No stance data available for this claim.")
-        return None
-
-    stance_df = _stance_rows_to_df(stance_rows)
-
-    fig = go.Figure()
-
-    stance_categories = [
-        ("agree_pct",    "agree_count",    "Agree",    "#2D6A4F"),
-        ("neutral_pct",  "neutral_count",  "Neutral",  "#FFD93D"),
-        ("disagree_pct", "disagree_count", "Disagree", "#C9184A"),
-    ]
-
-    for pct_col, count_col, label, color in stance_categories:
-        customdata = stance_df[count_col].tolist()
-        fig.add_trace(go.Bar(
-            name=label,
-            x=stance_df["source_name"],
-            y=stance_df[pct_col],
-            marker_color=color,
-            text=stance_df[pct_col].apply(lambda v: f"{v:.1f}%" if v >= 5 else ""),
-            textposition="inside",
-            textfont=dict(size=11, color="white" if label != "Neutral" else "black"),
-            customdata=customdata,
-            hovertemplate=(
-                "<b>%{x}</b><br>"
-                + f"{label}: %{{y:.1f}}%<br>"
-                + "Count: %{customdata}<extra></extra>"
-            ),
-        ))
-
-    fig.update_layout(
-        barmode="stack",
-        yaxis_title="Percentage of Articles (%)",
-        xaxis_title="Source",
-        height=400,
-        yaxis_range=[0, 100],
-        showlegend=True,
-        hovermode="x unified",
-        legend=dict(
-            title="Stance",
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-        ),
-    )
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
-
-    most_supportive = stance_df.loc[stance_df["agree_pct"].idxmax()]
-    most_critical   = stance_df.loc[stance_df["disagree_pct"].idxmax()]
-    st.caption(
-        f"💡 **Most supportive:** {most_supportive['source_name']} "
-        f"({most_supportive['agree_pct']:.1f}% agree) | "
-        f"**Most critical:** {most_critical['source_name']} "
-        f"({most_critical['disagree_pct']:.1f}% disagree)"
-    )
-
-    return stance_df
-
-
 # ============================================================================
 # Main UI
 # ============================================================================
@@ -619,8 +144,7 @@ col_title, col_settings = st.columns([5, 1])
 with col_title:
     st.title("💬 Ditwah Cyclone Chatbot")
     st.caption(
-        "Ask any question about Cyclone Ditwah. Get an answer grounded in newspaper articles, "
-        "then explore how each source stands on the related claims."
+        "Ask any question about Cyclone Ditwah. Get an answer grounded in newspaper articles."
     )
 with col_settings:
     st.markdown("<br>", unsafe_allow_html=True)
@@ -657,17 +181,10 @@ if question:
             llm = load_llm()
             answer = generate_answer(question, articles, llm)
 
-        with st.spinner("Generating hypothesis and bias-analysis claims…"):
-            hypothesis = generate_hypothesis(question, llm)
-            dynamic_claims = generate_claims_from_articles(question, articles, llm)
-
         # Persist in session state so reruns don't lose results
         st.session_state["chatbot_question"] = question
         st.session_state["chatbot_answer"] = answer
         st.session_state["chatbot_articles"] = [dict(a) for a in articles]
-        st.session_state["chatbot_hypothesis"] = hypothesis
-        st.session_state["chatbot_dynamic_claims"] = dynamic_claims
-        st.session_state["chatbot_stance_cache"] = {}   # reset cache for new question
         st.session_state["chatbot_article_page"] = 0
 
         st.markdown(answer)
@@ -678,7 +195,7 @@ if "chatbot_question" in st.session_state:
     stored_answer   = st.session_state["chatbot_answer"]
     stored_articles = st.session_state["chatbot_articles"]
 
-    # If this is a rerun (claim selection) and not a fresh question, re-show the answer block
+    # If this is a rerun and not a fresh question, re-show the answer block
     if question is None:
         with st.chat_message("user"):
             st.markdown(stored_question)
@@ -687,7 +204,6 @@ if "chatbot_question" in st.session_state:
 
     total = get_total_ditwah_count()
 
-    article_ids = tuple(str(a["id"]) for a in stored_articles)
     n = len(stored_articles)
 
     st.divider()
@@ -750,119 +266,6 @@ if "chatbot_question" in st.session_state:
             if st.button("Next →", disabled=(page >= total_pages - 1), key="art_next"):
                 st.session_state["chatbot_article_page"] = page + 1
                 st.rerun()
-
-    # ---- Question stance section ----
-    hypothesis = st.session_state.get("chatbot_hypothesis")
-    if hypothesis:
-        st.divider()
-        st.subheader("🔍 How do media outlets stand on your question?")
-        st.caption(
-            "Your question has been converted into a hypothesis. "
-            "NLI (roberta-large-mnli) then scores each retrieved article against it, "
-            "showing whether each newspaper source agrees, stays neutral, or disagrees."
-        )
-        st.info(f"**Hypothesis:** {hypothesis}")
-
-        hyp_method = st.radio(
-            "Stance analysis method",
-            options=["NLI", "LLM"],
-            index=0,
-            horizontal=True,
-            key="hyp_stance_method",
-            help="NLI: roberta-large-mnli (fast, local). LLM: uses configured LLM (slower, more nuanced).",
-        )
-
-        stance_cache = st.session_state.setdefault("chatbot_stance_cache", {})
-        cache_key = f"hyp__{hyp_method}__{hypothesis}"
-        if cache_key not in stance_cache:
-            with st.spinner(f"Running {hyp_method} stance analysis on hypothesis…"):
-                if hyp_method == "NLI":
-                    nli_analyzer = load_nli_analyzer()
-                    stance_cache[cache_key] = compute_stance_by_source(hypothesis, stored_articles, nli_analyzer)
-                else:
-                    llm_client = load_llm()
-                    stance_cache[cache_key] = compute_stance_by_source_llm(hypothesis, stored_articles, llm_client)
-            st.session_state["chatbot_stance_cache"] = stance_cache
-
-        q_stance_df = render_stance_chart(
-            stance_cache[cache_key],
-            chart_key=f"stance_distribution_chart_query_{hyp_method.lower()}",
-        )
-
-        if q_stance_df is not None:
-            st.markdown("---")
-            st.subheader("📖 What Do These Charts Mean?")
-            tab_q, = st.tabs(["⚖️ Stance Interpretation"])
-            with tab_q:
-                st.markdown(f"**Hypothesis:** *{hypothesis}*")
-                st.markdown("---")
-                st.markdown(generate_stance_interpretation(q_stance_df.copy(), hypothesis))
-
-    # ---- Dynamic claims section ----
-    dynamic_claims = st.session_state.get("chatbot_dynamic_claims", [])
-
-    if dynamic_claims:
-        st.divider()
-        st.subheader("📋 Claims extracted for bias analysis")
-        st.caption(
-            "These claims were extracted from the retrieved articles specifically to "
-            "reveal how different media outlets frame this topic. "
-            "Select a claim to see the stance of each newspaper source."
-        )
-
-        selected_claim_text = st.selectbox(
-            f"Choose a claim ({len(dynamic_claims)} extracted):",
-            options=dynamic_claims,
-            key="dynamic_claim_selector",
-        )
-
-        st.info(f"**Claim:** {selected_claim_text}")
-
-        st.subheader("⚖️ Stance Distribution: Do sources agree or disagree with this claim?")
-
-        claims_method = st.radio(
-            "Stance analysis method",
-            options=["NLI", "LLM"],
-            index=0,
-            horizontal=True,
-            key="claims_stance_method",
-            help="NLI: roberta-large-mnli (fast, local). LLM: uses configured LLM (slower, more nuanced).",
-        )
-
-        st.caption(
-            f"{'NLI (roberta-large-mnli)' if claims_method == 'NLI' else 'LLM'} scores each retrieved article against this claim. "
-            "Shows whether each newspaper source agrees, stays neutral, or disagrees."
-        )
-
-        # Cache results per (method, claim) to avoid recomputing on every widget rerun
-        stance_cache = st.session_state.setdefault("chatbot_stance_cache", {})
-        claim_cache_key = f"claim__{claims_method}__{selected_claim_text}"
-        if claim_cache_key not in stance_cache:
-            with st.spinner(f"Running {claims_method} stance analysis…"):
-                if claims_method == "NLI":
-                    nli_analyzer = load_nli_analyzer()
-                    stance_cache[claim_cache_key] = compute_stance_by_source(selected_claim_text, stored_articles, nli_analyzer)
-                else:
-                    llm_client = load_llm()
-                    stance_cache[claim_cache_key] = compute_stance_by_source_llm(selected_claim_text, stored_articles, llm_client)
-            # Explicitly persist mutation so Streamlit tracks the update
-            st.session_state["chatbot_stance_cache"] = stance_cache
-
-        stance_rows = stance_cache[claim_cache_key]
-
-        # Use a unique chart key per (method, claim) so Streamlit re-renders on changes
-        import hashlib as _hashlib
-        _claim_hash = _hashlib.md5(selected_claim_text.encode()).hexdigest()[:8]
-        stance_df = render_stance_chart(stance_rows, chart_key=f"stance_distribution_chart_claim_{claims_method.lower()}_{_claim_hash}")
-
-        if stance_df is not None:
-            st.markdown("---")
-            st.subheader("📖 What Do These Charts Mean?")
-            tab_stance, = st.tabs(["⚖️ Stance Interpretation"])
-            with tab_stance:
-                st.markdown(f"**Claim:** *{selected_claim_text}*")
-                st.markdown("---")
-                st.markdown(generate_stance_interpretation(stance_df.copy(), selected_claim_text))
 
 # Welcome state (no question asked yet)
 elif "chatbot_question" not in st.session_state:
